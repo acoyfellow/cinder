@@ -1,7 +1,9 @@
 use worker::*;
 
 mod cache;
+mod job_queue_do;
 mod jobs;
+mod runner_pool_do;
 mod runners;
 mod webhook;
 

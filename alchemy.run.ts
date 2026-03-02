@@ -39,7 +39,7 @@ export const orchestrator = await Worker("cinder-orchestrator", {
   },
 });
 
-export const cacheWorker = await Worker("cinder-cache", {
+export const cacheWorker = await Worker("cinder-cache-worker", {
   entrypoint: "./crates/cinder-cache/build/worker/shim.mjs",
   bindings: {
     CACHE_BUCKET: cacheBucket,
