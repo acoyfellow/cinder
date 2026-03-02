@@ -1,0 +1,26 @@
+{
+  "name": "@acoyfellow/cinder",
+  "version": "0.1.0",
+  "description": "open source CI runner acceleration on cloudflare",
+  "type": "module",
+  "scripts": {
+    "build:workers": "cargo install worker-build@^0.1 --locked && cargo install wasm-bindgen-cli --version 0.2.114 --locked --force && cd crates/cinder-orchestrator && WASM_BINDGEN_BIN=$HOME/.cargo/bin/wasm-bindgen worker-build --release && cd ../cinder-cache && WASM_BINDGEN_BIN=$HOME/.cargo/bin/wasm-bindgen worker-build --release",
+    "provision": "bun run build:workers && bun alchemy.run.ts",
+    "prove": "bun plan.ts"
+  },
+  "dependencies": {
+    "alchemy": "latest",
+    "gateproof": "file:../gateproof"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.6",
+    "typescript": "^5",
+    "wrangler": "^3"
+  },
+  "keywords": ["ci", "github-actions", "cloudflare", "runners", "cache"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acoyfellow/cinder"
+  }
+}
