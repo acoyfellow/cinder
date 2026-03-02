@@ -1,7 +1,9 @@
 use worker::*;
 use crate::AppState;
+use crate::job_queue_do::QueuedJob;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use wasm_bindgen::JsValue;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -29,8 +31,39 @@ pub async fn handle(mut req: Request, ctx: RouteContext<AppState>) -> Result<Res
 
     if action == "queued" {
         let job_id = payload["workflow_job"]["id"].as_u64().unwrap_or(0);
-        let _queue = ctx.env.durable_object("JOB_QUEUE")?;
-        // TODO: route to JobQueue DO and enqueue
+        let run_id = payload["workflow_job"]["run_id"].as_u64();
+        let repo = payload["repository"]["full_name"].as_str().map(str::to_string);
+        let labels = payload["workflow_job"]["labels"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let queue = ctx.env.durable_object("JOB_QUEUE")?;
+        let queue_id = queue.id_from_name("default")?;
+        let stub = queue_id.get_stub()?;
+        let mut request_init = RequestInit::new();
+        request_init.with_method(Method::Post);
+        request_init.with_body(Some(JsValue::from_str(
+            &serde_json::to_string(&QueuedJob {
+                job_id: Some(job_id),
+                run_id,
+                repo,
+                labels,
+            })
+            .map_err(|error| worker::Error::RustError(error.to_string()))?,
+        )));
+        let mut queue_request = Request::new_with_init("https://job-queue/enqueue", &request_init)?;
+        queue_request
+            .headers_mut()?
+            .set("Content-Type", "application/json")?;
+        let queue_response = stub.fetch_with_request(queue_request).await?;
+        if queue_response.status_code() >= 400 {
+            return Response::error("failed to enqueue job", 500);
+        }
         console_log!("action=job_queued job_id={}", job_id);
     }
 
