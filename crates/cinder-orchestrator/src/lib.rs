@@ -1,5 +1,6 @@
 use worker::*;
 
+mod build;
 mod cache;
 mod job_queue_do;
 mod jobs;
@@ -32,6 +33,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // cache — agents get presigned URLs from here
         .post_async("/cache/restore/:key", cache::restore)
         .post_async("/cache/upload", cache::upload)
+        .post_async("/test/build", build::run)
         // admin
         .post_async("/internal/token/rotate", |_, _| async {
             Response::error("not implemented", 501)

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build:workers": "cargo install worker-build@^0.1 --locked && cargo install wasm-bindgen-cli --version 0.2.114 --locked --force && cd crates/cinder-orchestrator && WASM_BINDGEN_BIN=$HOME/.cargo/bin/wasm-bindgen worker-build --release && cd ../cinder-cache && WASM_BINDGEN_BIN=$HOME/.cargo/bin/wasm-bindgen worker-build --release",
+    "harness": "bun harness.ts",
     "provision": "bun run build:workers && bun alchemy.run.ts",
     "prove": "bun plan.ts"
   },

@@ -353,7 +353,7 @@ const scope = {
             Assert.hasAction("build_complete"),
             Assert.numericDeltaFromEnv({
               source: "logMessage",
-              pattern: "build_duration_ms=(\\\\d+)",
+              pattern: "build_duration_ms=(\\d+)",
               baselineEnv: "COLD_BUILD_MS",
               minimumDelta: speedThresholdMs,
             }),
