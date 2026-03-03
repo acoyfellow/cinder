@@ -7,6 +7,21 @@ import {
   Worker,
 } from "alchemy/cloudflare";
 
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+
+  if (!value) {
+    throw new Error(`${name} is required for cinder provisioning`);
+  }
+
+  return value;
+}
+
+const fixtureRepo = process.env.CINDER_FIXTURE_REPO?.trim() || "acoyfellow/cinder-prd-test";
+const fixtureBranch = process.env.CINDER_FIXTURE_BRANCH?.trim() || "main";
+const fixtureWorkflow =
+  process.env.CINDER_FIXTURE_WORKFLOW?.trim() || "cinder-proof.yml";
+
 export const app = await alchemy("cinder", {
   stage: process.env.CINDER_STAGE ?? "production",
 });
@@ -34,8 +49,12 @@ export const orchestrator = await Worker("cinder-orchestrator", {
     RUNNER_STATE: runnerState,
     RUNNER_POOL: runnerPool,
     JOB_QUEUE: jobQueue,
-    GITHUB_WEBHOOK_SECRET: alchemy.secret(process.env.GITHUB_WEBHOOK_SECRET!),
-    CINDER_INTERNAL_TOKEN: alchemy.secret(process.env.CINDER_INTERNAL_TOKEN!),
+    GITHUB_WEBHOOK_SECRET: alchemy.secret(requireEnv("GITHUB_WEBHOOK_SECRET")),
+    CINDER_INTERNAL_TOKEN: alchemy.secret(requireEnv("CINDER_INTERNAL_TOKEN")),
+    GITHUB_PAT: alchemy.secret(requireEnv("GITHUB_PAT")),
+    CINDER_FIXTURE_REPO: fixtureRepo,
+    CINDER_FIXTURE_BRANCH: fixtureBranch,
+    CINDER_FIXTURE_WORKFLOW: fixtureWorkflow,
   },
 });
 
@@ -64,6 +83,9 @@ await Bun.write(
       orchestratorUrl: orchestrator.url,
       cacheWorkerName: cacheWorker.name,
       cacheWorkerUrl: cacheWorker.url,
+      fixtureRepo,
+      fixtureBranch,
+      fixtureWorkflow,
     },
     null,
     2,

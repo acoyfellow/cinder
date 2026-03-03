@@ -12,6 +12,10 @@ mod webhook;
 pub struct AppState {
     pub internal_token: String,
     pub webhook_secret: String,
+    pub github_pat: String,
+    pub fixture_repo: String,
+    pub fixture_branch: String,
+    pub fixture_workflow: String,
 }
 
 #[event(fetch)]
@@ -19,6 +23,10 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let state = AppState {
         internal_token: env.secret("CINDER_INTERNAL_TOKEN")?.to_string(),
         webhook_secret: env.secret("GITHUB_WEBHOOK_SECRET")?.to_string(),
+        github_pat: env.secret("GITHUB_PAT")?.to_string(),
+        fixture_repo: env.var("CINDER_FIXTURE_REPO")?.to_string(),
+        fixture_branch: env.var("CINDER_FIXTURE_BRANCH")?.to_string(),
+        fixture_workflow: env.var("CINDER_FIXTURE_WORKFLOW")?.to_string(),
     };
 
     let router = Router::with_data(state);
