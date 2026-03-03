@@ -62,6 +62,15 @@ function loadRuntimeState(): RuntimeState | null {
   }
 }
 
+function resolveLocalRunnerId(): string {
+  try {
+    const hostname = readFileSync("/etc/hostname", "utf8").trim();
+    return `cinder-${hostname || "unknown"}`;
+  } catch {
+    return "cinder-unknown";
+  }
+}
+
 const runtimeState = loadRuntimeState();
 const baseUrl = readOptionalEnv("CINDER_BASE_URL") ?? runtimeState?.orchestratorUrl ?? "";
 const workerName =
@@ -79,6 +88,7 @@ const speedThresholdMs = Number(process.env.SPEED_THRESHOLD_MS ?? "60000");
 const testRepo = process.env.TEST_REPO ?? "";
 const harnessBaseUrl = "http://127.0.0.1:9000";
 const harnessRunUrl = `${harnessBaseUrl}/test/run`;
+const localRunnerId = resolveLocalRunnerId();
 
 let managedHarness: ReturnType<typeof Bun.spawn> | null = null;
 
@@ -332,10 +342,7 @@ const scope = {
           ],
           act: [
             Act.exec(
-              `curl -sf -X POST ${baseUrl}/runners/register \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer ${internalToken}" \
-                -d '{"runner_id":"plan-test-runner","labels":["self-hosted","cinder"],"arch":"x86_64"}'`,
+              `sh -c 'cargo run --quiet -p cinder-agent -- --url "$CINDER_BASE_URL" --token "$CINDER_INTERNAL_TOKEN" --poll-ms 250 >/tmp/cinder-agent-proof.log 2>&1 & pid=$!; sleep 10; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true'`,
             ),
           ],
           assert: [
@@ -472,7 +479,7 @@ const scope = {
     cleanup: {
       actions: [
         Act.exec(
-          `if [ -n "${internalToken}" ] && [ -n "${baseUrl}" ]; then curl -sf -X DELETE ${baseUrl}/runners/plan-test-runner -H "Authorization: Bearer ${internalToken}" >/dev/null; else exit 0; fi`,
+          `if [ -n "${internalToken}" ] && [ -n "${baseUrl}" ]; then curl -sf -X DELETE ${baseUrl}/runners/${localRunnerId} -H "Authorization: Bearer ${internalToken}" >/dev/null; else exit 0; fi`,
         ),
       ],
     },
