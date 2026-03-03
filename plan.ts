@@ -674,4 +674,6 @@ if (import.meta.main) {
     stopManagedAgent();
     stopManagedHarness();
   }
+
+  process.exit(process.exitCode ?? 0);
 }
