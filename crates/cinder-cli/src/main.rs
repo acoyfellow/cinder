@@ -32,7 +32,22 @@ enum Commands {
 #[derive(Subcommand)]
 enum AgentCommands {
     /// start polling for jobs
-    Start,
+    Start {
+        #[arg(long)]
+        url: Option<String>,
+
+        #[arg(long)]
+        token: Option<String>,
+
+        #[arg(long)]
+        labels: Option<String>,
+
+        #[arg(long)]
+        poll_ms: Option<u64>,
+
+        #[arg(long)]
+        cache_dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -61,9 +76,24 @@ async fn main() -> Result<()> {
                 None,
             )?;
         }
-        Commands::Agent { cmd: AgentCommands::Start } => {
-            let url = resolve_base_url(&repo_root)?;
-            let token = require_env("CINDER_INTERNAL_TOKEN")?;
+        Commands::Agent {
+            cmd:
+                AgentCommands::Start {
+                    url,
+                    token,
+                    labels,
+                    poll_ms,
+                    cache_dir,
+                },
+        } => {
+            let url = match url {
+                Some(url) => url,
+                None => resolve_base_url(&repo_root)?,
+            };
+            let token = match token {
+                Some(token) => token,
+                None => resolve_agent_token()?,
+            };
             let mut args = vec![
                 "run".to_string(),
                 "--quiet".to_string(),
@@ -76,9 +106,19 @@ async fn main() -> Result<()> {
                 token,
             ];
 
-            if let Some(labels) = optional_env("CINDER_LABELS") {
+            if let Some(labels) = labels.or_else(|| optional_env("CINDER_LABELS")) {
                 args.push("--labels".to_string());
                 args.push(labels);
+            }
+
+            if let Some(poll_ms) = poll_ms {
+                args.push("--poll-ms".to_string());
+                args.push(poll_ms.to_string());
+            }
+
+            if let Some(cache_dir) = cache_dir {
+                args.push("--cache-dir".to_string());
+                args.push(cache_dir);
             }
 
             run_command(
@@ -136,10 +176,6 @@ where
     exit(status.code().unwrap_or(1));
 }
 
-fn require_env(name: &str) -> Result<String> {
-    optional_env(name).ok_or_else(|| anyhow::anyhow!("missing required environment variable {name}"))
-}
-
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().and_then(|value| {
         let trimmed = value.trim();
@@ -151,7 +187,21 @@ fn optional_env(name: &str) -> Option<String> {
     })
 }
 
+fn resolve_agent_token() -> Result<String> {
+    optional_env("CINDER_TOKEN")
+        .or_else(|| optional_env("CINDER_INTERNAL_TOKEN"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing agent token; set --token, CINDER_TOKEN, or CINDER_INTERNAL_TOKEN"
+            )
+        })
+}
+
 fn resolve_base_url(repo_root: &Path) -> Result<String> {
+    if let Some(url) = optional_env("CINDER_URL") {
+        return Ok(url);
+    }
+
     if let Some(url) = optional_env("CINDER_BASE_URL") {
         return Ok(url);
     }
