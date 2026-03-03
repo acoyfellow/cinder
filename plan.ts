@@ -91,6 +91,7 @@ const harnessRunUrl = `${harnessBaseUrl}/test/run`;
 const localRunnerId = resolveLocalRunnerId();
 const agentLogPath = "/tmp/cinder-agent-proof.log";
 const agentPidPath = "/tmp/cinder-agent-proof.pid";
+const runnerJobPath = "/tmp/cinder-proof-runner-job.json";
 
 let managedHarness: ReturnType<typeof Bun.spawn> | null = null;
 
@@ -285,6 +286,52 @@ const scope = {
           ],
           act: [
             Act.exec(
+              `bun -e 'const repo = ${JSON.stringify(fixtureRepo)};
+const workflow = ${JSON.stringify(fixtureWorkflow)};
+const branch = ${JSON.stringify(fixtureBranch)};
+const token = process.env.GITHUB_PAT;
+if (!token) {
+  throw new Error("GITHUB_PAT is required");
+}
+const headers = {
+  Accept: "application/vnd.github+json",
+  Authorization: "Bearer " + token,
+  "X-GitHub-Api-Version": "2022-11-28",
+};
+const listUrl =
+  "https://api.github.com/repos/" +
+  repo +
+  "/actions/workflows/" +
+  workflow +
+  "/runs?event=workflow_dispatch&branch=" +
+  encodeURIComponent(branch) +
+  "&per_page=20";
+const response = await fetch(listUrl, { headers });
+if (!response.ok) {
+  throw new Error("GitHub workflow run listing failed: " + response.status);
+}
+const payload = await response.json();
+const runs = Array.isArray(payload.workflow_runs) ? payload.workflow_runs : [];
+for (const run of runs) {
+  if (typeof run?.id !== "number" || run.status === "completed") {
+    continue;
+  }
+  const cancelResponse = await fetch(
+    "https://api.github.com/repos/" + repo + "/actions/runs/" + run.id + "/cancel",
+    {
+      method: "POST",
+      headers,
+    },
+  );
+  if (!cancelResponse.ok && cancelResponse.status !== 409) {
+    throw new Error("GitHub workflow cancel failed: " + cancelResponse.status);
+  }
+}'`,
+              {
+                timeoutMs: 60_000,
+              },
+            ),
+            Act.exec(
               `curl -sf -X POST https://api.github.com/repos/${fixtureRepo}/actions/workflows/${fixtureWorkflow}/dispatches \
                 -H "Accept: application/vnd.github+json" \
                 -H "Authorization: Bearer $GITHUB_PAT" \
@@ -344,7 +391,7 @@ const scope = {
       },
       {
         id: "runner",
-        title: "A runner can register into the pool",
+        title: "A runner can execute a queued GitHub job",
         gate: Gate.define({
           observe: workerLogs,
           prerequisites: [
@@ -364,18 +411,90 @@ const scope = {
               "CINDER_BASE_URL",
               "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
             ),
+            Require.env(
+              "GITHUB_PAT",
+              "GITHUB_PAT is required to confirm the queued GitHub run completed.",
+            ),
           ],
           act: [
             Act.exec(
+              `curl -sf ${baseUrl}/jobs/peek \
+                -H "Authorization: Bearer ${internalToken}" \
+                > "${runnerJobPath}"`,
+            ),
+            Act.exec(
               `sh -c 'if [ -f "${agentPidPath}" ] && kill -0 "$(cat "${agentPidPath}")" 2>/dev/null; then exit 0; fi; : >"${agentLogPath}"; cargo run --quiet -p cinder-agent -- --url "${baseUrl}" --token "${internalToken}" --poll-ms 250 >"${agentLogPath}" 2>&1 & echo $! >"${agentPidPath}"; sleep 5'`,
+            ),
+            Act.exec(
+              `bun -e 'import { existsSync, readFileSync } from "node:fs";
+const payload = JSON.parse(readFileSync(${JSON.stringify(runnerJobPath)}, "utf8"));
+if (typeof payload.run_id !== "number") {
+  throw new Error("queue payload missing run_id");
+}
+if (typeof payload.repo_full_name !== "string" || payload.repo_full_name.length === 0) {
+  throw new Error("queue payload missing repo_full_name");
+}
+const token = process.env.GITHUB_PAT;
+if (!token) {
+  throw new Error("GITHUB_PAT is required");
+}
+const headers = {
+  Accept: "application/vnd.github+json",
+  Authorization: "Bearer " + token,
+  "X-GitHub-Api-Version": "2022-11-28",
+};
+const deadline = Date.now() + 600000;
+let run = null;
+while (Date.now() < deadline) {
+  const response = await fetch(
+    "https://api.github.com/repos/" + payload.repo_full_name + "/actions/runs/" + payload.run_id,
+    { headers },
+  );
+  if (!response.ok) {
+    throw new Error("GitHub workflow run fetch failed: " + response.status);
+  }
+  run = await response.json();
+  if (run.status === "completed") {
+    break;
+  }
+  await Bun.sleep(2000);
+}
+if (!run || run.status !== "completed") {
+  throw new Error("GitHub workflow run did not complete");
+}
+const logNeedle = "completed with exit code 0";
+const logDeadline = Date.now() + 30000;
+while (Date.now() < logDeadline) {
+  if (existsSync(${JSON.stringify(agentLogPath)})) {
+    const logContents = readFileSync(${JSON.stringify(agentLogPath)}, "utf8");
+    if (logContents.includes(logNeedle)) {
+      break;
+    }
+  }
+  await Bun.sleep(500);
+}
+console.log(JSON.stringify(run));
+if (existsSync(${JSON.stringify(agentLogPath)})) {
+  console.log(readFileSync(${JSON.stringify(agentLogPath)}, "utf8"));
+}
+if (run.conclusion !== "success") {
+  process.exit(1);
+}'`,
+              {
+                timeoutMs: 600_000,
+              },
             ),
           ],
           assert: [
             Assert.noErrors(),
             Assert.hasAction("runner_registered"),
             Assert.hasAction("runner_pool_updated"),
+            Assert.hasAction("job_dequeued"),
+            Assert.responseBodyIncludes(`"conclusion":"success"`),
+            Assert.responseBodyIncludes("starting github runner for job"),
+            Assert.responseBodyIncludes("completed with exit code 0"),
           ],
-          timeoutMs: 8_000,
+          timeoutMs: 600_000,
         }),
       },
       {
