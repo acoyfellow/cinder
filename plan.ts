@@ -1,6 +1,6 @@
 import { Effect } from "effect";
 import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import type { ScopeFile } from "gateproof";
 import {
   Act,
@@ -89,6 +89,8 @@ const testRepo = process.env.TEST_REPO ?? "";
 const harnessBaseUrl = "http://127.0.0.1:9000";
 const harnessRunUrl = `${harnessBaseUrl}/test/run`;
 const localRunnerId = resolveLocalRunnerId();
+const agentLogPath = "/tmp/cinder-agent-proof.log";
+const agentPidPath = "/tmp/cinder-agent-proof.pid";
 
 let managedHarness: ReturnType<typeof Bun.spawn> | null = null;
 
@@ -132,6 +134,27 @@ function stopManagedHarness(): void {
 
   managedHarness.kill();
   managedHarness = null;
+}
+
+function stopManagedAgent(): void {
+  if (!existsSync(agentPidPath)) {
+    return;
+  }
+
+  try {
+    const pid = Number.parseInt(readFileSync(agentPidPath, "utf8").trim(), 10);
+    if (Number.isFinite(pid)) {
+      process.kill(pid);
+    }
+  } catch {
+    // Ignore stale proof agent state.
+  }
+
+  try {
+    rmSync(agentPidPath, { force: true });
+  } catch {
+    // Ignore pidfile cleanup failures during shutdown.
+  }
 }
 
 async function ensureColdBuildBaseline(): Promise<void> {
@@ -344,7 +367,7 @@ const scope = {
           ],
           act: [
             Act.exec(
-              `sh -c 'cargo run --quiet -p cinder-agent -- --url "$CINDER_BASE_URL" --token "$CINDER_INTERNAL_TOKEN" --poll-ms 250 >/tmp/cinder-agent-proof.log 2>&1 & pid=$!; sleep 10; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true'`,
+              `sh -c 'if [ -f "${agentPidPath}" ] && kill -0 "$(cat "${agentPidPath}")" 2>/dev/null; then exit 0; fi; : >"${agentLogPath}"; cargo run --quiet -p cinder-agent -- --url "${baseUrl}" --token "${internalToken}" --poll-ms 250 >"${agentLogPath}" 2>&1 & echo $! >"${agentPidPath}"; sleep 5'`,
             ),
           ],
           assert: [
@@ -510,6 +533,7 @@ if (import.meta.main) {
       process.exitCode = 1;
     }
   } finally {
+    stopManagedAgent();
     stopManagedHarness();
   }
 }
