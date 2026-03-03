@@ -66,6 +66,49 @@ const newKey = crypto.randomBytes(32).toString("hex");
 const speedThresholdMs = Number(process.env.SPEED_THRESHOLD_MS ?? "60000");
 const testRepo = process.env.TEST_REPO ?? "";
 
+async function ensureColdBuildBaseline(): Promise<void> {
+  if (readOptionalEnv("COLD_BUILD_MS")) {
+    return;
+  }
+
+  if (!testRepo) {
+    return;
+  }
+
+  try {
+    const response = await fetch("http://localhost:9000/test/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        repo: testRepo,
+        with_cache: false,
+      }),
+    });
+
+    if (!response.ok) {
+      return;
+    }
+
+    const parsed: unknown = await response.json();
+    if (!isRecord(parsed)) {
+      return;
+    }
+
+    const buildDurationMs = parsed.build_duration_ms;
+    if (typeof buildDurationMs !== "number" || !Number.isFinite(buildDurationMs)) {
+      return;
+    }
+
+    process.env.COLD_BUILD_MS = String(buildDurationMs);
+  } catch {
+    // Let the existing prerequisite fail clearly if the harness is unavailable.
+  }
+}
+
+await ensureColdBuildBaseline();
+
 function githubSignature(payload: string, secret: string): string {
   return (
     "sha256=" +
