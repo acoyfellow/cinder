@@ -47,6 +47,19 @@ impl DurableObject for JobQueue {
 
                 Response::from_json(&job)
             }
+            (Method::Get, "/peek") => {
+                let job = match self.state.storage().get::<QueuedJob>("next_job").await {
+                    Ok(job) => job,
+                    Err(_) => QueuedJob {
+                        job_id: None,
+                        run_id: None,
+                        repo: None,
+                        labels: Vec::new(),
+                    },
+                };
+
+                Response::from_json(&job)
+            }
             _ => Response::error("not found", 404),
         }
     }

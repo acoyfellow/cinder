@@ -35,6 +35,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // public — github calls this
         .post_async("/webhook/github", webhook::handle)
         // internal — agents call these
+        .get_async("/jobs/peek", jobs::peek)
         .get_async("/jobs/next", jobs::next)
         .post_async("/runners/register", runners::register)
         .delete_async("/runners/:id", runners::deregister)

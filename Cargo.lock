@@ -182,6 +182,7 @@ dependencies = [
 name = "cinder-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "hex",
  "hmac",
  "serde",

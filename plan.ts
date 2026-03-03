@@ -281,7 +281,7 @@ const scope = {
       },
       {
         id: "queue",
-        title: "A queued job can be dequeued",
+        title: "A queued job can be inspected without dequeueing",
         gate: Gate.define({
           observe: workerLogs,
           prerequisites: [
@@ -304,15 +304,17 @@ const scope = {
           ],
           act: [
             Act.exec(
-              `curl -sf ${baseUrl}/jobs/next \
+              `curl -sf ${baseUrl}/jobs/peek \
                 -H "Authorization: Bearer ${internalToken}"`,
             ),
           ],
           assert: [
             Assert.noErrors(),
-            Assert.hasAction("job_dequeued"),
-            Assert.responseBodyIncludes("run_id"),
-            Assert.responseBodyIncludes("labels"),
+            Assert.responseBodyIncludes("repo_full_name"),
+            Assert.responseBodyIncludes("repo_clone_url"),
+            Assert.responseBodyIncludes("runner_registration_url"),
+            Assert.responseBodyIncludes("runner_registration_token"),
+            Assert.responseBodyIncludes("cache_key"),
           ],
           timeoutMs: 8_000,
         }),
