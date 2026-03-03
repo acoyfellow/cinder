@@ -65,6 +65,52 @@ const missKey = crypto.randomBytes(32).toString("hex");
 const newKey = crypto.randomBytes(32).toString("hex");
 const speedThresholdMs = Number(process.env.SPEED_THRESHOLD_MS ?? "60000");
 const testRepo = process.env.TEST_REPO ?? "";
+const harnessBaseUrl = "http://127.0.0.1:9000";
+const harnessRunUrl = `${harnessBaseUrl}/test/run`;
+
+let managedHarness: ReturnType<typeof Bun.spawn> | null = null;
+
+async function canReachLocalHarness(): Promise<boolean> {
+  try {
+    const response = await fetch(harnessBaseUrl);
+    return response.ok || response.status === 404;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureLocalHarness(): Promise<void> {
+  if (await canReachLocalHarness()) {
+    return;
+  }
+
+  managedHarness = Bun.spawn({
+    cmd: ["bun", "harness.ts"],
+    cwd: process.cwd(),
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await canReachLocalHarness()) {
+      return;
+    }
+
+    await Bun.sleep(100);
+  }
+
+  throw new Error("cinder proof harness did not start on 127.0.0.1:9000");
+}
+
+function stopManagedHarness(): void {
+  if (!managedHarness) {
+    return;
+  }
+
+  managedHarness.kill();
+  managedHarness = null;
+}
 
 async function ensureColdBuildBaseline(): Promise<void> {
   if (readOptionalEnv("COLD_BUILD_MS")) {
@@ -76,7 +122,7 @@ async function ensureColdBuildBaseline(): Promise<void> {
   }
 
   try {
-    const response = await fetch("http://localhost:9000/test/run", {
+    const response = await fetch(harnessRunUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -386,7 +432,7 @@ const scope = {
           ],
           act: [
             Act.exec(
-              `curl -sf -X POST http://localhost:9000/test/run \
+              `curl -sf -X POST ${harnessRunUrl} \
                 -H "Content-Type: application/json" \
                 -d '{"repo":"${testRepo}","with_cache":true}'`,
             ),
@@ -422,15 +468,25 @@ const scope = {
 export default scope;
 
 if (import.meta.main) {
-  const result = await Effect.runPromise(
-    Plan.runLoop(scope.plan, {
-      maxIterations: scope.plan.loop?.maxIterations,
-    }),
-  );
+  if (testRepo) {
+    await ensureLocalHarness();
+  }
 
-  console.log(JSON.stringify(result, null, 2));
+  await ensureColdBuildBaseline();
 
-  if (result.status !== "pass") {
-    process.exitCode = 1;
+  try {
+    const result = await Effect.runPromise(
+      Plan.runLoop(scope.plan, {
+        maxIterations: scope.plan.loop?.maxIterations,
+      }),
+    );
+
+    console.log(JSON.stringify(result, null, 2));
+
+    if (result.status !== "pass") {
+      process.exitCode = 1;
+    }
+  } finally {
+    stopManagedHarness();
   }
 }
