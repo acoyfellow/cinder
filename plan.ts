@@ -92,6 +92,7 @@ const localRunnerId = resolveLocalRunnerId();
 const agentLogPath = "/tmp/cinder-agent-proof.log";
 const agentPidPath = "/tmp/cinder-agent-proof.pid";
 const runnerJobPath = "/tmp/cinder-proof-runner-job.json";
+const queuePayloadPath = "/tmp/cinder-proof-queue-payload.json";
 
 let managedHarness: ReturnType<typeof Bun.spawn> | null = null;
 
@@ -374,8 +375,9 @@ for (const run of runs) {
           ],
           act: [
             Act.exec(
-              `curl -sf ${baseUrl}/jobs/peek \
-                -H "Authorization: Bearer ${internalToken}"`,
+              `sh -c 'curl -sf ${baseUrl}/jobs/peek \
+                -H "Authorization: Bearer ${internalToken}" \
+                | tee "${queuePayloadPath}"'`,
             ),
           ],
           assert: [
@@ -499,7 +501,7 @@ if (run.conclusion !== "success") {
       },
       {
         id: "cache-restore",
-        title: "A missing cache key returns a clean miss",
+        title: "The fixture cache key currently restores as a cold miss",
         gate: Gate.define({
           observe: workerLogs,
           prerequisites: [
@@ -522,13 +524,30 @@ if (run.conclusion !== "success") {
           ],
           act: [
             Act.exec(
-              `curl -sf -X POST ${baseUrl}/cache/restore/${missKey} \
-                -H "Authorization: Bearer ${internalToken}"`,
+              `bun -e 'import { readFileSync } from "node:fs";
+const payload = JSON.parse(readFileSync(${JSON.stringify(queuePayloadPath)}, "utf8"));
+if (typeof payload.cache_key !== "string" || payload.cache_key.length === 0) {
+  throw new Error("queue payload missing cache_key");
+}
+const response = await fetch(
+  ${JSON.stringify(baseUrl)} + "/cache/restore/" + payload.cache_key,
+  {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + ${JSON.stringify(internalToken)},
+    },
+  },
+);
+if (!response.ok) {
+  throw new Error("cache restore failed: " + response.status);
+}
+console.log(await response.text());'`,
             ),
           ],
           assert: [
             Assert.noErrors(),
             Assert.hasAction("cache_miss"),
+            Assert.responseBodyIncludes(`"miss":true`),
           ],
           timeoutMs: 5_000,
         }),
