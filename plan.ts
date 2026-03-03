@@ -14,6 +14,9 @@ import { Cloudflare } from "gateproof/cloudflare";
 type RuntimeState = {
   orchestratorName?: string;
   orchestratorUrl?: string;
+  fixtureRepo?: string;
+  fixtureBranch?: string;
+  fixtureWorkflow?: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -48,6 +51,11 @@ function loadRuntimeState(): RuntimeState | null {
         typeof parsed.orchestratorName === "string" ? parsed.orchestratorName : undefined,
       orchestratorUrl:
         typeof parsed.orchestratorUrl === "string" ? parsed.orchestratorUrl : undefined,
+      fixtureRepo: typeof parsed.fixtureRepo === "string" ? parsed.fixtureRepo : undefined,
+      fixtureBranch:
+        typeof parsed.fixtureBranch === "string" ? parsed.fixtureBranch : undefined,
+      fixtureWorkflow:
+        typeof parsed.fixtureWorkflow === "string" ? parsed.fixtureWorkflow : undefined,
     };
   } catch {
     return null;
@@ -58,8 +66,12 @@ const runtimeState = loadRuntimeState();
 const baseUrl = readOptionalEnv("CINDER_BASE_URL") ?? runtimeState?.orchestratorUrl ?? "";
 const workerName =
   readOptionalEnv("CINDER_WORKER_NAME") ?? runtimeState?.orchestratorName ?? "cinder-orchestrator";
+const fixtureRepo =
+  readOptionalEnv("CINDER_FIXTURE_REPO") ?? runtimeState?.fixtureRepo ?? "acoyfellow/cinder-prd-test";
+const fixtureBranch = readOptionalEnv("CINDER_FIXTURE_BRANCH") ?? runtimeState?.fixtureBranch ?? "";
+const fixtureWorkflow =
+  readOptionalEnv("CINDER_FIXTURE_WORKFLOW") ?? runtimeState?.fixtureWorkflow ?? "";
 const internalToken = readOptionalEnv("CINDER_INTERNAL_TOKEN") ?? "";
-const webhookSecret = readOptionalEnv("GITHUB_WEBHOOK_SECRET") ?? "";
 
 const missKey = crypto.randomBytes(32).toString("hex");
 const newKey = crypto.randomBytes(32).toString("hex");
@@ -155,26 +167,6 @@ async function ensureColdBuildBaseline(): Promise<void> {
 
 await ensureColdBuildBaseline();
 
-function githubSignature(payload: string, secret: string): string {
-  return (
-    "sha256=" +
-    crypto.createHmac("sha256", secret).update(payload).digest("hex")
-  );
-}
-
-const webhookPayload = JSON.stringify({
-  action: "queued",
-  workflow_job: {
-    id: 99991,
-    run_id: 99991,
-    name: "cinder-plan-test",
-    labels: ["self-hosted", "cinder"],
-  },
-  repository: {
-    full_name: "acoyfellow/cinder-prd-test",
-  },
-});
-
 const workerLogs = Cloudflare.observe({
   accountId: readOptionalEnv("CLOUDFLARE_ACCOUNT_ID") ?? "",
   apiToken: readOptionalEnv("CLOUDFLARE_API_TOKEN") ?? "",
@@ -189,6 +181,18 @@ if (!process.env.CINDER_BASE_URL && baseUrl) {
 
 if (!process.env.CINDER_WORKER_NAME && workerName) {
   process.env.CINDER_WORKER_NAME = workerName;
+}
+
+if (!process.env.CINDER_FIXTURE_REPO && fixtureRepo) {
+  process.env.CINDER_FIXTURE_REPO = fixtureRepo;
+}
+
+if (!process.env.CINDER_FIXTURE_BRANCH && fixtureBranch) {
+  process.env.CINDER_FIXTURE_BRANCH = fixtureBranch;
+}
+
+if (!process.env.CINDER_FIXTURE_WORKFLOW && fixtureWorkflow) {
+  process.env.CINDER_FIXTURE_WORKFLOW = fixtureWorkflow;
 }
 
 const scope = {
@@ -226,8 +230,16 @@ const scope = {
               "CLOUDFLARE_API_TOKEN is required for Cloudflare worker log observation.",
             ),
             Require.env(
-              "GITHUB_WEBHOOK_SECRET",
-              "GITHUB_WEBHOOK_SECRET is required for webhook verification.",
+              "GITHUB_PAT",
+              "GITHUB_PAT is required to dispatch the GitHub proof workflow.",
+            ),
+            Require.env(
+              "CINDER_FIXTURE_BRANCH",
+              "Run bun run provision first or set CINDER_FIXTURE_BRANCH for the GitHub proof fixture.",
+            ),
+            Require.env(
+              "CINDER_FIXTURE_WORKFLOW",
+              "Run bun run provision first or set CINDER_FIXTURE_WORKFLOW for the GitHub proof fixture.",
             ),
             Require.env(
               "CINDER_INTERNAL_TOKEN",
@@ -240,11 +252,13 @@ const scope = {
           ],
           act: [
             Act.exec(
-              `curl -sf -X POST ${baseUrl}/webhook/github \
-                -H "Content-Type: application/json" \
-                -H "X-Hub-Signature-256: ${githubSignature(webhookPayload, webhookSecret)}" \
-                -d '${webhookPayload}'`,
+              `curl -sf -X POST https://api.github.com/repos/${fixtureRepo}/actions/workflows/${fixtureWorkflow}/dispatches \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GITHUB_PAT" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -d '${JSON.stringify({ ref: fixtureBranch })}'`,
             ),
+            Act.exec("sleep 5"),
           ],
           assert: [
             Assert.noErrors(),
@@ -252,7 +266,7 @@ const scope = {
             Assert.hasAction("signature_verified"),
             Assert.hasAction("job_queued"),
           ],
-          timeoutMs: 10_000,
+          timeoutMs: 20_000,
         }),
       },
       {
