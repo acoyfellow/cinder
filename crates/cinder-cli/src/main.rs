@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use std::fs;
 use std::io::Read;
@@ -16,7 +16,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// provision cinder infra and verify it works
-    Deploy,
+    Deploy {
+        #[arg(long)]
+        account_id: Option<String>,
+
+        #[arg(long)]
+        api_token: Option<String>,
+
+        #[arg(long)]
+        state_bucket: Option<String>,
+
+        #[arg(long)]
+        region: Option<StateRegion>,
+    },
     /// start a runner agent on this machine
     Agent {
         #[command(subcommand)]
@@ -56,6 +68,29 @@ enum TokenCommands {
     Rotate,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum StateRegion {
+    Auto,
+    Wnam,
+    Enam,
+    Weur,
+    Eeur,
+    Apac,
+}
+
+impl StateRegion {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Wnam => "wnam",
+            Self::Enam => "enam",
+            Self::Weur => "weur",
+            Self::Eeur => "eeur",
+            Self::Apac => "apac",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RuntimeManifest {
     #[serde(rename = "orchestratorUrl")]
@@ -68,12 +103,39 @@ async fn main() -> Result<()> {
     let repo_root = std::env::current_dir().context("failed to resolve current working directory")?;
 
     match cli.command {
-        Commands::Deploy => {
+        Commands::Deploy {
+            account_id,
+            api_token,
+            state_bucket,
+            region,
+        } => {
+            if region.is_some() && state_bucket.is_none() {
+                return Err(anyhow::anyhow!("--region requires --state-bucket"));
+            }
+
+            let mut extra_env = Vec::new();
+
+            if let Some(account_id) = account_id {
+                extra_env.push(("CLOUDFLARE_ACCOUNT_ID".to_string(), account_id));
+            }
+
+            if let Some(api_token) = api_token {
+                extra_env.push(("CLOUDFLARE_API_TOKEN".to_string(), api_token));
+            }
+
+            if let Some(state_bucket) = state_bucket {
+                extra_env.push(("CINDER_STATE_BUCKET".to_string(), state_bucket));
+                extra_env.push((
+                    "CINDER_STATE_REGION".to_string(),
+                    region.unwrap_or(StateRegion::Auto).as_str().to_string(),
+                ));
+            }
+
             run_command(
                 &repo_root,
                 "bun",
                 ["run", "provision"],
-                None,
+                (!extra_env.is_empty()).then_some(extra_env.as_slice()),
             )?;
         }
         Commands::Agent {
@@ -148,7 +210,7 @@ fn run_command<'a, I>(
     cwd: &Path,
     program: &str,
     args: I,
-    extra_env: Option<&[(&str, &str)]>,
+    extra_env: Option<&[(String, String)]>,
 ) -> Result<()>
 where
     I: IntoIterator<Item = &'a str>,
@@ -162,7 +224,7 @@ where
         .stderr(Stdio::inherit());
 
     if let Some(extra_env) = extra_env {
-        command.envs(extra_env.iter().copied());
+        command.envs(extra_env.iter().map(|(key, value)| (key, value)));
     }
 
     let status = command

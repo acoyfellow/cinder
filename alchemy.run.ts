@@ -1,11 +1,16 @@
 import alchemy from "alchemy";
 import { Buffer } from "node:buffer";
 import { mkdir } from "node:fs/promises";
+import { R2RestStateStore } from "alchemy/state";
 import {
+  CloudflareApiError,
   DurableObjectNamespace,
   KVNamespace,
   R2Bucket,
   Worker,
+  createBucket,
+  createCloudflareApi,
+  getBucket,
 } from "alchemy/cloudflare";
 
 function requireEnv(name: string): string {
@@ -26,6 +31,8 @@ const fixtureBranch = process.env.CINDER_FIXTURE_BRANCH?.trim() || "main";
 const fixtureWorkflow =
   process.env.CINDER_FIXTURE_WORKFLOW?.trim() || "cinder-proof.yml";
 const githubApiBase = "https://api.github.com";
+const stateBucketName = process.env.CINDER_STATE_BUCKET?.trim();
+const stateBucketRegion = process.env.CINDER_STATE_REGION?.trim() || "auto";
 
 const fixtureCargoToml = `[package]
 name = "cinder-proof"
@@ -374,8 +381,40 @@ async function syncFixtureRepository(webhookUrl: string) {
   await upsertFixtureWebhook(webhookUrl);
 }
 
+async function ensureStateBucket(bucketName: string, locationHint: string) {
+  const accountId = requireEnv("CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = requireEnv("CLOUDFLARE_API_TOKEN");
+  const api = await createCloudflareApi({ accountId, apiToken } as any);
+
+  try {
+    await getBucket(api, bucketName);
+    return { accountId, apiToken };
+  } catch (error) {
+    if (!(error instanceof CloudflareApiError) || error.status !== 404) {
+      throw error;
+    }
+  }
+
+  await createBucket(api, bucketName, { locationHint });
+  return { accountId, apiToken };
+}
+
+const stateStoreCredentials = stateBucketName
+  ? await ensureStateBucket(stateBucketName, stateBucketRegion)
+  : null;
+
 export const app = await alchemy("cinder", {
   stage: process.env.CINDER_STAGE ?? "production",
+  ...(stateBucketName && stateStoreCredentials
+    ? {
+        stateStore: (scope) =>
+          new R2RestStateStore(scope, {
+            accountId: stateStoreCredentials.accountId,
+            apiToken: stateStoreCredentials.apiToken,
+            bucketName: stateBucketName,
+          } as any),
+      }
+    : {}),
 });
 
 export const cacheBucket = await R2Bucket("cinder-cache", {
@@ -412,7 +451,7 @@ export const orchestrator = await Worker("cinder-orchestrator", {
     GITHUB_WEBHOOK_SECRET: alchemy.secret(webhookSecret),
     CINDER_INTERNAL_TOKEN: alchemy.secret(internalToken),
     GITHUB_PAT: alchemy.secret(githubPat),
-    CINDER_CACHE_WORKER_URL: cacheWorker.url,
+    CINDER_CACHE_WORKER_URL: cacheWorker.url!,
     CINDER_FIXTURE_REPO: fixtureRepo,
     CINDER_FIXTURE_BRANCH: fixtureBranch,
     CINDER_FIXTURE_WORKFLOW: fixtureWorkflow,
