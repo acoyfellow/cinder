@@ -437,13 +437,29 @@ if (typeof payload.cache_key !== "string" || payload.cache_key.length === 0) {
   throw new Error("runner job payload missing cache_key");
 }
 const key = payload.cache_key;
-const base = ${JSON.stringify(cacheWorkerUrl)};
-if (!base) {
-  throw new Error("CINDER_CACHE_WORKER_URL is required for fixture cache reset");
-}
 const token = ${JSON.stringify(internalToken)};
 if (!token) {
   throw new Error("CINDER_INTERNAL_TOKEN is required for fixture cache reset");
+}
+let base = ${JSON.stringify(cacheWorkerUrl)};
+const restoreProbe = await fetch(
+  ${JSON.stringify(baseUrl)} + "/cache/restore/" + key,
+  {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + token,
+    },
+  },
+);
+if (!restoreProbe.ok) {
+  throw new Error("fixture cache reset probe failed: " + restoreProbe.status);
+}
+const restorePayload = await restoreProbe.json();
+if (typeof restorePayload.url === "string" && restorePayload.url.length > 0) {
+  base = new URL(restorePayload.url).origin;
+}
+if (!base) {
+  throw new Error("cache worker base URL is required for fixture cache reset");
 }
 const exp = Math.floor(Date.now() / 1000) + 3600;
 const sig = crypto
@@ -798,7 +814,8 @@ while (Date.now() < deadline) {
 if (!run || run.status !== "completed") {
   throw new Error("warm GitHub workflow run did not complete");
 }
-console.log(JSON.stringify(run));'`,
+console.log(JSON.stringify(run));
+console.log(readFileSync(${JSON.stringify(agentLogPath)}, "utf8"));'`,
               {
                 timeoutMs: 600_000,
               },
@@ -806,8 +823,8 @@ console.log(JSON.stringify(run));'`,
           ],
           assert: [
             Assert.noErrors(),
-            Assert.hasAction("cache_hit"),
             Assert.responseBodyIncludes(`"conclusion":"success"`),
+            Assert.responseBodyIncludes("cache restored for job"),
           ],
           timeoutMs: 600_000,
         }),
