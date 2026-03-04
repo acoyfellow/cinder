@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tokio::{fs, process::Command};
 use tracing::{error, info, warn};
 
-const RUNNER_VERSION: &str = "2.328.0";
+const RUNNER_VERSION: &str = "2.332.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "cinder-agent", about = "cinder runner agent")]
@@ -294,10 +294,10 @@ async fn configure_runner(
 
 fn runner_artifact_name() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "x86_64") => Ok("actions-runner-osx-x64-2.328.0.tar.gz"),
-        ("macos", "aarch64") => Ok("actions-runner-osx-arm64-2.328.0.tar.gz"),
-        ("linux", "x86_64") => Ok("actions-runner-linux-x64-2.328.0.tar.gz"),
-        ("linux", "aarch64") => Ok("actions-runner-linux-arm64-2.328.0.tar.gz"),
+        ("macos", "x86_64") => Ok("actions-runner-osx-x64-2.332.0.tar.gz"),
+        ("macos", "aarch64") => Ok("actions-runner-osx-arm64-2.332.0.tar.gz"),
+        ("linux", "x86_64") => Ok("actions-runner-linux-x64-2.332.0.tar.gz"),
+        ("linux", "aarch64") => Ok("actions-runner-linux-arm64-2.332.0.tar.gz"),
         (os, arch) => Err(anyhow!("unsupported host for github runner: {os}/{arch}")),
     }
 }

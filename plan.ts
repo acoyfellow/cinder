@@ -652,6 +652,8 @@ console.log(await response.text());'`,
 export default scope;
 
 if (import.meta.main) {
+  stopManagedAgent();
+
   if (testRepo) {
     await ensureLocalHarness();
   }
