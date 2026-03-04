@@ -13,13 +13,9 @@ cinder makes your github actions builds faster by caching deps at the cloudflare
 
 ## how fast
 
-| | cold | warm |
-|---|---|---|
-| `cargo build` (medium workspace) | 4m 12s | 38s |
-| `npm ci` (large monorepo) | 2m 55s | 14s |
-| `pip install` (ml project) | 3m 40s | 22s |
+the gateproof case study proves a real cold run and a real warm run on the canonical Cargo fixture repo. `speed-claim` only passes when the warm run is measurably faster than the cold run (`SPEED_THRESHOLD_MS`, default `60000`).
 
-cache lives in R2. your runners pull from the nearest cloudflare edge. if you've seen blacksmith or depot, this is that — but open source and running on your own account.
+cache lives in R2 and is served through a dedicated cache worker. runners restore before execution and upload after execution.
 
 ---
 
@@ -30,13 +26,13 @@ github webhook
   → cinder orchestrator   (cloudflare worker)
     → job queued           (durable object)
       → your agent picks it up
-        → cache pulled from R2 (~10ms, zero egress)
-          → CARGO_HOME / NPM_CONFIG_CACHE / PIP_CACHE_DIR injected
-            → build runs
-              → cache diff pushed back to R2
+        → cache pulled from R2
+          → CARGO_HOME + CARGO_TARGET_DIR staged for the run
+            → cargo build runs
+              → cache archive pushed back to R2
 ```
 
-the cache key is `sha256(Cargo.lock)` — or whatever lockfile your project uses. if the lockfile hasn't changed, the cache is valid. always. no TTLs, no manual invalidation.
+current proven cache key: `sha256(Cargo.lock)` from the fixture repo.
 
 ---
 
@@ -78,14 +74,13 @@ that's it. no other changes.
 
 ## supported ecosystems
 
-| lockfile | cache dir |
-|---|---|
-| `Cargo.lock` | `CARGO_HOME` |
-| `package-lock.json` / `bun.lock` / `yarn.lock` | `NPM_CONFIG_CACHE` |
-| `requirements.txt` / `Pipfile.lock` / `poetry.lock` | `PIP_CACHE_DIR` |
-| `go.sum` | `GOPATH/pkg/mod` |
+currently proven in this repository:
 
-multiple ecosystems in one repo? cinder detects all lockfiles and caches everything.
+| lockfile | cache dirs staged by agent |
+|---|---|
+| `Cargo.lock` | `CARGO_HOME`, `CARGO_TARGET_DIR` |
+
+other ecosystems are roadmap work, not part of the current proven implementation.
 
 ---
 
@@ -107,12 +102,6 @@ cinder agent start --url $CINDER_URL --token $CINDER_TOKEN --labels self-hosted,
 
 agents are stateless. run as many as you want. the orchestrator routes jobs by label match.
 
-**cache a custom directory**
-
-```bash
-CINDER_EXTRA_CACHE_DIRS="~/.gradle/caches,~/.m2" cinder agent start ...
-```
-
 **rotate the auth token**
 
 ```bash
@@ -126,6 +115,8 @@ by default cinder manages its own state. to use a bucket you already have:
 ```bash
 cinder deploy --state-bucket my-existing-bucket
 ```
+
+if you are switching an already-running stage to a new state bucket, use a clean stage for that migration path.
 
 ---
 
@@ -174,7 +165,7 @@ the orchestrator is a worker with two sqlite-backed durable objects. runner stat
 | name | type |
 |------|------|
 | `cinder-orchestrator` | cloudflare worker |
-| `cinder-cache` | cloudflare worker |
+| `cinder-cache-worker` | cloudflare worker |
 | `cinder-cache` | R2 bucket |
 | `cinder-runner-state` | KV namespace |
 | `RunnerPool` | durable object (sqlite) |
