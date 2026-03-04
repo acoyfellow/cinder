@@ -46,6 +46,17 @@ struct Job {
     cache_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CacheRestoreResponse {
+    miss: Option<bool>,
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheUploadResponse {
+    url: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -147,6 +158,9 @@ async fn execute_job(
     let jobs_dir = args.cache_dir.join("jobs");
     let job_dir = jobs_dir.join(job_id.to_string());
     let toolcache_dir = args.cache_dir.join("runner-toolcache");
+    let cache_root = args.cache_dir.join("build-cache");
+    let cargo_home = cache_root.join("cargo-home");
+    let cargo_target = cache_root.join("cargo-target");
     let archive_path = ensure_runner_archive(client, &toolcache_dir).await?;
 
     if fs::try_exists(&job_dir).await.unwrap_or(false) {
@@ -161,6 +175,20 @@ async fn execute_job(
     fs::create_dir_all(&job_dir)
         .await
         .with_context(|| format!("create job directory {}", job_dir.display()))?;
+    reset_cache_dirs(&cache_root, &cargo_home, &cargo_target).await?;
+
+    if let Some(cache_key) = job.cache_key.as_deref() {
+        restore_cache(
+            client,
+            &args.url,
+            &args.token,
+            job_id,
+            cache_key,
+            &cache_root,
+            &args.cache_dir,
+        )
+        .await?;
+    }
 
     extract_runner_archive(&archive_path, &job_dir).await?;
 
@@ -182,6 +210,8 @@ async fn execute_job(
 
     let status = Command::new("./run.sh")
         .current_dir(&job_dir)
+        .env("CARGO_HOME", &cargo_home)
+        .env("CARGO_TARGET_DIR", &cargo_target)
         .status()
         .await
         .context("start github runner")?;
@@ -191,6 +221,19 @@ async fn execute_job(
     info!("job {} completed with exit code {}", job_id, exit_code);
 
     if status.success() {
+        if let Some(cache_key) = job.cache_key.as_deref() {
+            upload_cache(
+                client,
+                &args.url,
+                &args.token,
+                job_id,
+                cache_key,
+                &cache_root,
+                &args.cache_dir,
+            )
+            .await?;
+        }
+
         fs::remove_dir_all(&job_dir)
             .await
             .with_context(|| format!("remove completed job directory {}", job_dir.display()))?;
@@ -255,6 +298,185 @@ async fn extract_runner_archive(archive_path: &PathBuf, job_dir: &PathBuf) -> Re
         bail!("tar exited with {code}");
     }
 
+    Ok(())
+}
+
+async fn reset_cache_dirs(cache_root: &PathBuf, cargo_home: &PathBuf, cargo_target: &PathBuf) -> Result<()> {
+    if fs::try_exists(cargo_home).await.unwrap_or(false) {
+        fs::remove_dir_all(cargo_home)
+            .await
+            .with_context(|| format!("remove stale cargo home {}", cargo_home.display()))?;
+    }
+
+    if fs::try_exists(cargo_target).await.unwrap_or(false) {
+        fs::remove_dir_all(cargo_target)
+            .await
+            .with_context(|| format!("remove stale cargo target {}", cargo_target.display()))?;
+    }
+
+    fs::create_dir_all(cache_root)
+        .await
+        .with_context(|| format!("create cache root {}", cache_root.display()))?;
+    fs::create_dir_all(cargo_home)
+        .await
+        .with_context(|| format!("create cargo home {}", cargo_home.display()))?;
+    fs::create_dir_all(cargo_target)
+        .await
+        .with_context(|| format!("create cargo target {}", cargo_target.display()))?;
+
+    Ok(())
+}
+
+async fn restore_cache(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    job_id: u64,
+    cache_key: &str,
+    cache_root: &PathBuf,
+    scratch_dir: &PathBuf,
+) -> Result<()> {
+    let response = client
+        .post(format!("{}/cache/restore/{}", base_url, cache_key))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("request cache restore")?
+        .error_for_status()
+        .context("cache restore request failed")?;
+
+    let restore: CacheRestoreResponse = response.json().await.context("decode cache restore response")?;
+
+    if restore.miss.unwrap_or(false) || restore.url.as_deref().unwrap_or("").is_empty() {
+        println!("cache miss for job {}", job_id);
+        info!("cache miss for job {}", job_id);
+        return Ok(());
+    }
+
+    let archive_path = scratch_dir.join(format!("cache-restore-{job_id}.tar.xz"));
+    let archive_bytes = client
+        .get(
+            restore
+                .url
+                .as_deref()
+                .context("cache restore response missing url")?,
+        )
+        .send()
+        .await
+        .context("download cache archive")?
+        .error_for_status()
+        .context("cache archive download failed")?
+        .bytes()
+        .await
+        .context("read cache archive bytes")?;
+
+    fs::write(&archive_path, archive_bytes)
+        .await
+        .with_context(|| format!("write cache restore archive {}", archive_path.display()))?;
+
+    let status = Command::new("tar")
+        .arg("-xJf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(cache_root)
+        .status()
+        .await
+        .context("extract cache archive")?;
+
+    let _ = fs::remove_file(&archive_path).await;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        bail!("cache restore extraction failed with {code}");
+    }
+
+    println!("cache restored for job {}", job_id);
+    info!("cache restored for job {}", job_id);
+    Ok(())
+}
+
+async fn upload_cache(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    job_id: u64,
+    cache_key: &str,
+    cache_root: &PathBuf,
+    scratch_dir: &PathBuf,
+) -> Result<()> {
+    let archive_path = scratch_dir.join(format!("cache-upload-{job_id}.tar.xz"));
+    let mut archive_entries = Vec::new();
+
+    for relative in [
+        "cargo-home/registry/cache",
+        "cargo-home/registry/index",
+        "cargo-target/release/.fingerprint",
+    ] {
+        if fs::try_exists(cache_root.join(relative)).await.unwrap_or(false) {
+            archive_entries.push(relative.to_string());
+        }
+    }
+
+    if archive_entries.is_empty() {
+        warn!("no cacheable artifacts found for job {}", job_id);
+        return Ok(());
+    }
+
+    let status = Command::new("tar")
+        .current_dir(cache_root)
+        .arg("-cJf")
+        .arg(&archive_path)
+        .args(&archive_entries)
+        .status()
+        .await
+        .context("create cache archive")?;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        bail!("cache archive creation failed with {code}");
+    }
+
+    let size_bytes = fs::metadata(&archive_path)
+        .await
+        .with_context(|| format!("stat cache archive {}", archive_path.display()))?
+        .len();
+
+    let upload_response = client
+        .post(format!("{}/cache/upload", base_url))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "key": cache_key,
+            "content_type": "application/x-xz",
+            "size_bytes": size_bytes,
+        }))
+        .send()
+        .await
+        .context("request cache upload url")?
+        .error_for_status()
+        .context("cache upload url request failed")?;
+
+    let upload: CacheUploadResponse = upload_response
+        .json()
+        .await
+        .context("decode cache upload response")?;
+    let upload_url = upload.url.as_deref().context("cache upload response missing url")?;
+    let archive_bytes = fs::read(&archive_path)
+        .await
+        .with_context(|| format!("read cache archive {}", archive_path.display()))?;
+
+    client
+        .put(upload_url)
+        .body(archive_bytes)
+        .send()
+        .await
+        .context("upload cache archive")?
+        .error_for_status()
+        .context("cache archive upload failed")?;
+
+    let _ = fs::remove_file(&archive_path).await;
+
+    println!("cache uploaded for job {}", job_id);
+    info!("cache uploaded for job {}", job_id);
     Ok(())
 }
 

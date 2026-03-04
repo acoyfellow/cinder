@@ -394,6 +394,14 @@ export const jobQueue = await DurableObjectNamespace("JobQueue", {
   sqlite: true,
 });
 
+export const cacheWorker = await Worker("cinder-cache-worker", {
+  entrypoint: "./crates/cinder-cache/build/worker/shim.mjs",
+  bindings: {
+    CACHE_BUCKET: cacheBucket,
+    CINDER_INTERNAL_TOKEN: alchemy.secret(internalToken),
+  },
+});
+
 export const orchestrator = await Worker("cinder-orchestrator", {
   entrypoint: "./crates/cinder-orchestrator/build/worker/shim.mjs",
   bindings: {
@@ -404,17 +412,10 @@ export const orchestrator = await Worker("cinder-orchestrator", {
     GITHUB_WEBHOOK_SECRET: alchemy.secret(webhookSecret),
     CINDER_INTERNAL_TOKEN: alchemy.secret(internalToken),
     GITHUB_PAT: alchemy.secret(githubPat),
+    CINDER_CACHE_WORKER_URL: cacheWorker.url,
     CINDER_FIXTURE_REPO: fixtureRepo,
     CINDER_FIXTURE_BRANCH: fixtureBranch,
     CINDER_FIXTURE_WORKFLOW: fixtureWorkflow,
-  },
-});
-
-export const cacheWorker = await Worker("cinder-cache-worker", {
-  entrypoint: "./crates/cinder-cache/build/worker/shim.mjs",
-  bindings: {
-    CACHE_BUCKET: cacheBucket,
-    CINDER_INTERNAL_TOKEN: alchemy.secret(internalToken),
   },
 });
 
