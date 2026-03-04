@@ -554,7 +554,7 @@ console.log(await response.text());'`,
       },
       {
         id: "cache-push",
-        title: "The cache upload path returns a usable upload URL",
+        title: "The cache upload path returns a real cache-worker upload URL",
         gate: Gate.define({
           observe: workerLogs,
           prerequisites: [
@@ -577,16 +577,95 @@ console.log(await response.text());'`,
           ],
           act: [
             Act.exec(
-              `curl -sf -X POST ${baseUrl}/cache/upload \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer ${internalToken}" \
-                -d '{"key":"${newKey}","content_type":"application/x-tar","size_bytes":1024}'`,
+              `sh -c 'rm -f /tmp/cinder-proof-cache-push.tar.xz /tmp/cinder-proof-cache-push-download.tar.xz /tmp/cinder-proof-cache-push-upload.json /tmp/cinder-proof-cache-push-restore.json /tmp/cinder-proof-cache-push-list.txt; tmpdir="$(mktemp -d)"; printf "proof\\n" > "$tmpdir/proof.txt"; tar -cJf /tmp/cinder-proof-cache-push.tar.xz -C "$tmpdir" proof.txt; rm -rf "$tmpdir"'`,
+            ),
+            Act.exec(
+              `bun -e 'import { writeFileSync } from "node:fs";
+const response = await fetch(
+  ${JSON.stringify(baseUrl)} + "/cache/upload",
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + ${JSON.stringify(internalToken)},
+    },
+    body: JSON.stringify({
+      key: ${JSON.stringify(newKey)},
+      content_type: "application/x-xz",
+      size_bytes: 1024,
+    }),
+  },
+);
+if (!response.ok) {
+  throw new Error("cache upload failed: " + response.status);
+}
+const upload = await response.json();
+if (typeof upload.url !== "string" || upload.url.length === 0) {
+  throw new Error("cache upload response missing url");
+}
+if (!upload.url.includes("/objects/")) {
+  throw new Error("cache upload returned non-worker url");
+}
+writeFileSync("/tmp/cinder-proof-cache-push-upload.json", JSON.stringify(upload));
+console.log(JSON.stringify(upload));'`,
+            ),
+            Act.exec(
+              `bun -e 'import { readFileSync } from "node:fs";
+const upload = JSON.parse(readFileSync("/tmp/cinder-proof-cache-push-upload.json", "utf8"));
+const archive = readFileSync("/tmp/cinder-proof-cache-push.tar.xz");
+const response = await fetch(upload.url, {
+  method: "PUT",
+  body: archive,
+});
+if (!response.ok) {
+  throw new Error("cache object upload failed: " + response.status);
+}
+console.log("cache object uploaded");'`,
+            ),
+            Act.exec(
+              `bun -e 'import { writeFileSync } from "node:fs";
+const response = await fetch(
+  ${JSON.stringify(baseUrl)} + "/cache/restore/" + ${JSON.stringify(newKey)},
+  {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + ${JSON.stringify(internalToken)},
+    },
+  },
+);
+if (!response.ok) {
+  throw new Error("cache restore failed: " + response.status);
+}
+const restore = await response.json();
+if (restore.miss === true) {
+  throw new Error("cache restore returned miss after upload");
+}
+if (typeof restore.url !== "string" || restore.url.length === 0) {
+  throw new Error("cache restore response missing url");
+}
+writeFileSync("/tmp/cinder-proof-cache-push-restore.json", JSON.stringify(restore));
+console.log(JSON.stringify(restore));'`,
+            ),
+            Act.exec(
+              `bun -e 'import { readFileSync, writeFileSync } from "node:fs";
+const restore = JSON.parse(readFileSync("/tmp/cinder-proof-cache-push-restore.json", "utf8"));
+const response = await fetch(restore.url);
+if (!response.ok) {
+  throw new Error("cache object download failed: " + response.status);
+}
+const bytes = new Uint8Array(await response.arrayBuffer());
+writeFileSync("/tmp/cinder-proof-cache-push-download.tar.xz", bytes);
+console.log("cache object downloaded");'`,
+            ),
+            Act.exec(
+              `sh -c 'test -s /tmp/cinder-proof-cache-push-download.tar.xz && tar -tJf /tmp/cinder-proof-cache-push-download.tar.xz > /tmp/cinder-proof-cache-push-list.txt && cat /tmp/cinder-proof-cache-push-list.txt'`,
             ),
           ],
           assert: [
             Assert.noErrors(),
             Assert.hasAction("upload_url_generated"),
-            Assert.responseBodyIncludes("http"),
+            Assert.hasAction("cache_hit"),
+            Assert.responseBodyIncludes("proof.txt"),
           ],
           timeoutMs: 8_000,
         }),
