@@ -191,6 +191,12 @@ This case study starts from the smallest honest state:
 
 ---
 
+## repository layout
+
+`main` is the clean, curated history. The case-study branches (`case-study-start`, `case-study-end`) and tags (`cinder-case-study-start-2026-03`, `cinder-case-study-end-2026-03`) preserve the original ~48h Gateproof build. See [CASE_STUDY.md](https://github.com/acoyfellow/cinder/blob/case-study-end/CASE_STUDY.md) on `case-study-end` for details.
+
+---
+
 ## contributing
 
 rust all the way down. `crates/cinder-agent` for the agent binary, `crates/cinder-orchestrator` for the orchestrator worker, `crates/cinder-cache` for the cache worker, `crates/cinder-cli` for the CLI.
