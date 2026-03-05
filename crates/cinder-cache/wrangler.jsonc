@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cinder-cache",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2025-03-07",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "build": {
+    "command": "cargo install worker-build@^0.1 --locked && worker-build --release"
+  },
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  "r2_buckets": [
+    { "binding": "CACHE_BUCKET", "bucket_name": "cinder-cache" }
+  ]
+}
