@@ -10,4 +10,4 @@ This branch (`case-study-end`) and `case-study-start` preserve the raw, unedited
 
 **How to reproduce the proof**: Run `bun run plan.ts` after provisioning infra with `bun run alchemy.run.ts`. Requires `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `GITHUB_TOKEN`, and fixture repo config.
 
-**Preservation**: Protect these branches (no force-push, no deletion) via GitHub Settings > Branches > Add rule for `case-study-start` and `case-study-end`.
+**Preservation**: Protect these branches (no force-push, no deletion) via GitHub Settings > Branches > Add rule for `case-study-start` and `case-study-end`. A read-only archive is at [acoyfellow/cinder-case-study](https://github.com/acoyfellow/cinder-case-study).
