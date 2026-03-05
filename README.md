@@ -193,7 +193,7 @@ This case study starts from the smallest honest state:
 
 ## repository layout
 
-`main` is the clean, curated history. The case-study branches (`case-study-start`, `case-study-end`) and tags (`cinder-case-study-start-2026-03`, `cinder-case-study-end-2026-03`) preserve the original ~48h Gateproof build. See [CASE_STUDY.md](https://github.com/acoyfellow/cinder/blob/case-study-end/CASE_STUDY.md) on `case-study-end` for details.
+`main` is the clean, curated history. The case-study branches (`case-study-start`, `case-study-end`) and tags (`cinder-case-study-start-2026-03`, `cinder-case-study-end-2026-03`) preserve the original ~48h Gateproof build. A read-only archive lives at [acoyfellow/cinder-case-study](https://github.com/acoyfellow/cinder-case-study). See [CASE_STUDY.md](https://github.com/acoyfellow/cinder/blob/case-study-end/CASE_STUDY.md) on `case-study-end` for details.
 
 ---
 
