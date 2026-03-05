@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "gateproof": ["../gateproof/src/index.ts"],
+      "gateproof/cloudflare": ["../gateproof/src/cloudflare/index.ts"]
+    },
+    "strict": true,
+    "types": ["bun-types"],
+    "skipLibCheck": true
+  }
+}

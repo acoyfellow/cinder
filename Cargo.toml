@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/cinder-orchestrator",
+    "crates/cinder-cache",
+    "crates/cinder-agent",
+    "crates/cinder-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Jordan Guymon <jordan@coey.dev>"]
+license = "MIT"
+repository = "https://github.com/acoyfellow/cinder"
+
+[profile.release]
+opt-level = "z"
+lto = true

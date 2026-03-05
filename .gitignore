@@ -1,0 +1,12 @@
+.DS_Store
+.alchemy/
+target/
+node_modules/
+.wrangler/
+build/
+dist/
+.gateproof/
+.env
+.env.*
+!.env.example
+*.pem
