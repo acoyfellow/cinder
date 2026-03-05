@@ -17,6 +17,8 @@ the gateproof case study proves a real cold run and a real warm run on the canon
 
 cache lives in R2 and is served through a dedicated cache worker. runners restore before execution and upload after execution.
 
+**Demo:** Run the full proof locally (webhook, queue, runner, cache, speed claim). See [examples/](examples/).
+
 ---
 
 ## how it works
