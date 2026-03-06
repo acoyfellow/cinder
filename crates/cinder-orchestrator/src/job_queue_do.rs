@@ -31,6 +31,16 @@ impl DurableObject for JobQueue {
                 self.state.storage().put("next_job", &job).await?;
                 Response::ok("queued")
             }
+            (Method::Post, "/evict") => {
+                let candidate: QueuedJob = req.json().await?;
+                if let Ok(current) = self.state.storage().get::<QueuedJob>("next_job").await {
+                    if current.job_id == candidate.job_id && current.run_id == candidate.run_id {
+                        self.state.storage().delete("next_job").await?;
+                    }
+                }
+
+                Response::ok("evicted")
+            }
             (Method::Get, "/dequeue") => {
                 let job = match self.state.storage().get::<QueuedJob>("next_job").await {
                     Ok(job) => {

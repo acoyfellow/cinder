@@ -130,6 +130,7 @@ const agentLogPath = "/tmp/cinder-agent-proof.log";
 const agentPidPath = "/tmp/cinder-agent-proof.pid";
 const queuePayloadPath = "/tmp/cinder-proof-queue-payload.json";
 const expectedRunIdPath = "/tmp/cinder-proof-expected-run-id.txt";
+const primedRunIdPath = "/tmp/cinder-proof-primed-run-id.txt";
 
 const workerLogs = Cloudflare.observe({
   accountId: readOptionalEnv("CLOUDFLARE_ACCOUNT_ID") ?? "",
@@ -206,7 +207,7 @@ const scope = {
               `curl -sf ${baseUrl}/jobs/next -H "Authorization: Bearer ${internalToken}" >/dev/null || true`,
             ),
             Act.exec(
-              `bun -e 'import { writeFileSync } from "node:fs";
+              `bun -e 'import { rmSync, writeFileSync } from "node:fs";
 const repo = ${JSON.stringify(targetRepo)};
 const workflow = ${JSON.stringify(targetWorkflow)};
 const branch = ${JSON.stringify(targetBranch)};
@@ -237,23 +238,10 @@ const runs = Array.isArray(listPayload.workflow_runs) ? listPayload.workflow_run
 const maxId = runs.reduce((highest, run) => {
   return typeof run?.id === "number" && run.id > highest ? run.id : highest;
 }, 0);
+rmSync(${JSON.stringify(primedRunIdPath)}, { force: true });
+rmSync(${JSON.stringify(expectedRunIdPath)}, { force: true });
 writeFileSync("/tmp/cinder-proof-gateproof-before.txt", String(maxId));
-writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", new Date().toISOString());
-for (const run of runs) {
-  if (typeof run?.id !== "number" || run.status === "completed") {
-    continue;
-  }
-  const cancelResponse = await fetch(
-    "https://api.github.com/repos/" + repo + "/actions/runs/" + run.id + "/cancel",
-    {
-      method: "POST",
-      headers,
-    },
-  );
-  if (!cancelResponse.ok && cancelResponse.status !== 409) {
-    throw new Error("GitHub workflow cancel failed: " + cancelResponse.status);
-  }
-}'`,
+'`,
               {
                 timeoutMs: 60_000,
               },
@@ -322,15 +310,98 @@ while (Date.now() < deadline) {
   }
   const payload = await response.json();
   const runs = Array.isArray(payload.workflow_runs) ? payload.workflow_runs : [];
-  const nextRun = runs.find((run) => typeof run?.id === "number" && run.id > before);
-  if (nextRun?.id) {
-    writeFileSync(${JSON.stringify(expectedRunIdPath)}, String(nextRun.id));
-    console.log(JSON.stringify({ expected_run_id: nextRun.id }));
+  const nextRunId = runs.reduce((highest, run) => {
+    return typeof run?.id === "number" && run.id > highest ? run.id : highest;
+  }, before);
+  if (nextRunId > before) {
+    writeFileSync(${JSON.stringify(primedRunIdPath)}, String(nextRunId));
+    console.log(JSON.stringify({ primed_run_id: nextRunId }));
     process.exit(0);
   }
   await Bun.sleep(2000);
 }
-throw new Error("no fresh Gateproof workflow run was created after dispatch");'`,
+throw new Error("no priming Gateproof workflow run was created after dispatch");'`,
+              {
+                timeoutMs: 300_000,
+              },
+            ),
+            Act.exec(
+              `bun -e 'import { writeFileSync } from "node:fs";
+const repo = ${JSON.stringify(targetRepo)};
+const workflow = ${JSON.stringify(targetWorkflow)};
+const branch = ${JSON.stringify(targetBranch)};
+const token = process.env.GITHUB_PAT;
+if (!token) {
+  throw new Error("GITHUB_PAT is required");
+}
+writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", new Date().toISOString());
+const response = await fetch(
+  "https://api.github.com/repos/" +
+    repo +
+    "/actions/workflows/" +
+    encodeURIComponent(workflow) +
+    "/dispatches",
+  {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + token,
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ref: branch }),
+  },
+);
+if (!response.ok) {
+  throw new Error("GitHub workflow dispatch failed: " + response.status);
+}'`,
+            ),
+            Act.exec(
+              `bun -e 'import { readFileSync, writeFileSync } from "node:fs";
+const repo = ${JSON.stringify(targetRepo)};
+const workflow = ${JSON.stringify(targetWorkflow)};
+const branch = ${JSON.stringify(targetBranch)};
+const token = process.env.GITHUB_PAT;
+if (!token) {
+  throw new Error("GITHUB_PAT is required");
+}
+const primedRunId = Number.parseInt(readFileSync(${JSON.stringify(primedRunIdPath)}, "utf8").trim(), 10);
+if (!Number.isFinite(primedRunId)) {
+  throw new Error("missing primed Gateproof workflow run marker");
+}
+const headers = {
+  Accept: "application/vnd.github+json",
+  Authorization: "Bearer " + token,
+  "X-GitHub-Api-Version": "2022-11-28",
+};
+const deadline = Date.now() + 300000;
+while (Date.now() < deadline) {
+  const response = await fetch(
+    "https://api.github.com/repos/" +
+      repo +
+      "/actions/workflows/" +
+      encodeURIComponent(workflow) +
+      "/runs?event=workflow_dispatch&branch=" +
+      encodeURIComponent(branch) +
+      "&per_page=20",
+    { headers },
+  );
+  if (!response.ok) {
+    throw new Error("GitHub workflow run listing failed: " + response.status);
+  }
+  const payload = await response.json();
+  const runs = Array.isArray(payload.workflow_runs) ? payload.workflow_runs : [];
+  const nextRunId = runs.reduce((highest, run) => {
+    return typeof run?.id === "number" && run.id > highest ? run.id : highest;
+  }, primedRunId);
+  if (nextRunId > primedRunId) {
+    writeFileSync(${JSON.stringify(expectedRunIdPath)}, String(nextRunId));
+    console.log(JSON.stringify({ primed_run_id: primedRunId, expected_run_id: nextRunId }));
+    process.exit(0);
+  }
+  await Bun.sleep(2000);
+}
+throw new Error("no fresh Gateproof workflow run was created after the primed run");'`,
               {
                 timeoutMs: 300_000,
               },
@@ -465,6 +536,20 @@ while (Date.now() < deadline) {
     matchesRepo &&
     matchesLabels &&
     typeof payload.job_id === "number" &&
+    typeof payload.run_id === "number" &&
+    payload.run_id !== expectedRunId
+  ) {
+    throw new Error(
+      "queued Gateproof deploy job run_id " +
+        payload.run_id +
+        " did not match expected run_id " +
+        expectedRunId,
+    );
+  }
+  if (
+    matchesRepo &&
+    matchesLabels &&
+    typeof payload.job_id === "number" &&
     payload.run_id === expectedRunId &&
     typeof payload.runner_registration_token === "string" &&
     payload.runner_registration_token.length > 0
@@ -540,36 +625,13 @@ const headers = {
   Authorization: "Bearer " + token,
   "X-GitHub-Api-Version": "2022-11-28",
 };
-const deadline = Date.now() + 1800000;
-let run = null;
-while (Date.now() < deadline) {
-  const response = await fetch(
-    "https://api.github.com/repos/" + payload.repo_full_name + "/actions/runs/" + payload.run_id,
-    { headers },
-  );
-  if (!response.ok) {
-    if (response.status >= 500) {
-      await Bun.sleep(2000);
-      continue;
-    }
-    throw new Error("GitHub workflow run fetch failed: " + response.status);
-  }
-  run = await response.json();
-  if (run.status === "completed") {
-    break;
-  }
-  await Bun.sleep(5000);
-}
-if (!run || run.status !== "completed") {
-  throw new Error("GitHub workflow run did not complete");
-}
 const logNeedles = [
   "accepted job " + payload.job_id + " for run " + payload.run_id + " repo " + payload.repo_full_name,
   "starting github runner for job " + payload.job_id,
   "github runner configured for " + payload.repo_full_name,
   "job " + payload.job_id + " completed with exit code 0",
 ];
-const logDeadline = Date.now() + 30000;
+const logDeadline = Date.now() + 300000;
 let exactLogsObserved = false;
 while (Date.now() < logDeadline) {
   if (existsSync(${JSON.stringify(agentLogPath)})) {
@@ -584,11 +646,49 @@ while (Date.now() < logDeadline) {
 if (!exactLogsObserved) {
   throw new Error("agent log did not include the exact accepted-job identity lines");
 }
-console.log(JSON.stringify(run));
+const jobsDeadline = Date.now() + 30000;
+let matchedJob = null;
+while (Date.now() < jobsDeadline) {
+  const jobsResponse = await fetch(
+    "https://api.github.com/repos/" +
+      payload.repo_full_name +
+      "/actions/runs/" +
+      payload.run_id +
+      "/jobs?per_page=100",
+    { headers },
+  );
+  if (!jobsResponse.ok) {
+    if (jobsResponse.status >= 500) {
+      await Bun.sleep(2000);
+      continue;
+    }
+    throw new Error("GitHub workflow jobs fetch failed: " + jobsResponse.status);
+  }
+  const jobsPayload = await jobsResponse.json();
+  const jobs = Array.isArray(jobsPayload.jobs) ? jobsPayload.jobs : [];
+  matchedJob = jobs.find((job) => job?.id === payload.job_id);
+  if (matchedJob) {
+    break;
+  }
+  await Bun.sleep(1000);
+}
+if (!matchedJob) {
+  throw new Error("GitHub workflow jobs never exposed the expected deploy job");
+}
+console.log(JSON.stringify(matchedJob));
 if (existsSync(${JSON.stringify(agentLogPath)})) {
   console.log(readFileSync(${JSON.stringify(agentLogPath)}, "utf8"));
 }
-if (run.conclusion !== "success") {
+if (matchedJob.name !== "Deploy Demo Site") {
+  throw new Error("expected the queued GitHub job to be Deploy Demo Site");
+}
+if (!Array.isArray(matchedJob.labels) || !matchedJob.labels.includes("cinder")) {
+  throw new Error("expected the queued GitHub job to retain the cinder label");
+}
+if (typeof matchedJob.run_id !== "number" || matchedJob.run_id !== payload.run_id) {
+  throw new Error("GitHub job record did not match the expected run");
+}
+if (matchedJob.status === "completed" && matchedJob.conclusion !== "success") {
   process.exit(1);
 }'`,
               {
@@ -601,7 +701,7 @@ if (run.conclusion !== "success") {
             Assert.hasAction("runner_registered"),
             Assert.hasAction("runner_pool_updated"),
             Assert.hasAction("job_dequeued"),
-            Assert.responseBodyIncludes(`"conclusion":"success"`),
+            Assert.responseBodyIncludes(`"name":"Deploy Demo Site"`),
             Assert.responseBodyIncludes("accepted job "),
             Assert.responseBodyIncludes("starting github runner for job"),
             Assert.responseBodyIncludes("completed with exit code 0"),
