@@ -129,6 +129,7 @@ const localRunnerId = resolveLocalRunnerId();
 const agentLogPath = "/tmp/cinder-agent-proof.log";
 const agentPidPath = "/tmp/cinder-agent-proof.pid";
 const queuePayloadPath = "/tmp/cinder-proof-queue-payload.json";
+const expectedRunIdPath = "/tmp/cinder-proof-expected-run-id.txt";
 
 const workerLogs = Cloudflare.observe({
   accountId: readOptionalEnv("CLOUDFLARE_ACCOUNT_ID") ?? "",
@@ -287,6 +288,54 @@ if (!response.ok) {
 }'`,
             ),
             Act.exec(
+              `bun -e 'import { readFileSync, writeFileSync } from "node:fs";
+const repo = ${JSON.stringify(targetRepo)};
+const workflow = ${JSON.stringify(targetWorkflow)};
+const branch = ${JSON.stringify(targetBranch)};
+const token = process.env.GITHUB_PAT;
+if (!token) {
+  throw new Error("GITHUB_PAT is required");
+}
+const before = Number.parseInt(readFileSync("/tmp/cinder-proof-gateproof-before.txt", "utf8").trim(), 10);
+if (!Number.isFinite(before)) {
+  throw new Error("missing prior Gateproof workflow run marker");
+}
+const headers = {
+  Accept: "application/vnd.github+json",
+  Authorization: "Bearer " + token,
+  "X-GitHub-Api-Version": "2022-11-28",
+};
+const deadline = Date.now() + 300000;
+while (Date.now() < deadline) {
+  const response = await fetch(
+    "https://api.github.com/repos/" +
+      repo +
+      "/actions/workflows/" +
+      encodeURIComponent(workflow) +
+      "/runs?event=workflow_dispatch&branch=" +
+      encodeURIComponent(branch) +
+      "&per_page=20",
+    { headers },
+  );
+  if (!response.ok) {
+    throw new Error("GitHub workflow run listing failed: " + response.status);
+  }
+  const payload = await response.json();
+  const runs = Array.isArray(payload.workflow_runs) ? payload.workflow_runs : [];
+  const nextRun = runs.find((run) => typeof run?.id === "number" && run.id > before);
+  if (nextRun?.id) {
+    writeFileSync(${JSON.stringify(expectedRunIdPath)}, String(nextRun.id));
+    console.log(JSON.stringify({ expected_run_id: nextRun.id }));
+    process.exit(0);
+  }
+  await Bun.sleep(2000);
+}
+throw new Error("no fresh Gateproof workflow run was created after dispatch");'`,
+              {
+                timeoutMs: 300_000,
+              },
+            ),
+            Act.exec(
               `bun -e 'const repo = ${JSON.stringify(targetRepo)};
 const token = process.env.GITHUB_PAT;
 if (!token) {
@@ -391,6 +440,13 @@ const baseUrl = ${JSON.stringify(baseUrl)};
 const token = ${JSON.stringify(internalToken)};
 const targetRepo = ${JSON.stringify(targetRepo)};
 const outputPath = ${JSON.stringify(queuePayloadPath)};
+const expectedRunId = Number.parseInt(
+  await Bun.file(${JSON.stringify(expectedRunIdPath)}).text(),
+  10,
+);
+if (!Number.isFinite(expectedRunId)) {
+  throw new Error("missing expected Gateproof run id");
+}
 const deadline = Date.now() + 600000;
 while (Date.now() < deadline) {
   const response = await fetch(baseUrl + "/jobs/peek", {
@@ -409,11 +465,12 @@ while (Date.now() < deadline) {
     matchesRepo &&
     matchesLabels &&
     typeof payload.job_id === "number" &&
+    payload.run_id === expectedRunId &&
     typeof payload.runner_registration_token === "string" &&
     payload.runner_registration_token.length > 0
   ) {
     writeFileSync(outputPath, JSON.stringify(payload, null, 2));
-    console.log(JSON.stringify(payload));
+    console.log(JSON.stringify({ expected_run_id: expectedRunId, payload }));
     process.exit(0);
   }
   await Bun.sleep(2000);
@@ -427,6 +484,7 @@ throw new Error("no queued Gateproof deploy job became available");'`,
           assert: [
             Assert.noErrors(),
             Assert.responseBodyIncludes(`"repo_full_name":"${targetRepo}"`),
+            Assert.responseBodyIncludes(`"expected_run_id":`),
             Assert.responseBodyIncludes(`"runner_registration_url":"https://github.com/${targetRepo}"`),
             Assert.responseBodyIncludes(`"runner_registration_token":"`),
           ],
