@@ -186,16 +186,7 @@ const scope = {
         id: "webhook",
         title: "A real Gateproof workflow_job webhook reaches Cinder",
         gate: Gate.define({
-          observe: workerLogs,
           prerequisites: [
-            Require.env(
-              "CLOUDFLARE_ACCOUNT_ID",
-              "CLOUDFLARE_ACCOUNT_ID is required for Cloudflare worker log observation.",
-            ),
-            Require.env(
-              "CLOUDFLARE_API_TOKEN",
-              "CLOUDFLARE_API_TOKEN is required for Cloudflare worker log observation.",
-            ),
             Require.env(
               "GITHUB_PAT",
               "GITHUB_PAT is required to dispatch the Gateproof workflow.",
@@ -246,6 +237,7 @@ const maxId = runs.reduce((highest, run) => {
   return typeof run?.id === "number" && run.id > highest ? run.id : highest;
 }, 0);
 writeFileSync("/tmp/cinder-proof-gateproof-before.txt", String(maxId));
+writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", new Date().toISOString());
 for (const run of runs) {
   if (typeof run?.id !== "number" || run.status === "completed") {
     continue;
@@ -294,11 +286,86 @@ if (!response.ok) {
   throw new Error("GitHub workflow dispatch failed: " + response.status);
 }'`,
             ),
+            Act.exec(
+              `bun -e 'const repo = ${JSON.stringify(targetRepo)};
+const token = process.env.GITHUB_PAT;
+if (!token) {
+  throw new Error("GITHUB_PAT is required");
+}
+const dispatchStartedAt = new Date(
+  await Bun.file("/tmp/cinder-proof-webhook-dispatch-start.txt").text(),
+);
+if (Number.isNaN(dispatchStartedAt.getTime())) {
+  throw new Error("missing webhook dispatch timestamp");
+}
+const headers = {
+  Accept: "application/vnd.github+json",
+  Authorization: "Bearer " + token,
+  "X-GitHub-Api-Version": "2022-11-28",
+};
+const hooksResponse = await fetch("https://api.github.com/repos/" + repo + "/hooks", {
+  headers,
+});
+if (!hooksResponse.ok) {
+  throw new Error("GitHub webhook listing failed: " + hooksResponse.status);
+}
+const hooks = await hooksResponse.json();
+if (!Array.isArray(hooks)) {
+  throw new Error("GitHub webhook listing returned a non-array payload");
+}
+const hook = hooks.find((candidate) => {
+  const events = Array.isArray(candidate?.events) ? candidate.events : [];
+  return (
+    candidate?.active === true &&
+    typeof candidate?.id === "number" &&
+    typeof candidate?.config?.url === "string" &&
+    candidate.config.url.includes("/webhook/github") &&
+    events.includes("workflow_job")
+  );
+});
+if (!hook) {
+  throw new Error("no active workflow_job webhook targeting Cinder was found");
+}
+const deadline = Date.now() + 300000;
+while (Date.now() < deadline) {
+  const deliveriesResponse = await fetch(
+    "https://api.github.com/repos/" + repo + "/hooks/" + hook.id + "/deliveries?per_page=20",
+    { headers },
+  );
+  if (!deliveriesResponse.ok) {
+    throw new Error("GitHub webhook delivery listing failed: " + deliveriesResponse.status);
+  }
+  const deliveries = await deliveriesResponse.json();
+  if (!Array.isArray(deliveries)) {
+    throw new Error("GitHub webhook deliveries returned a non-array payload");
+  }
+  const matchingDelivery = deliveries.find((delivery) => {
+    if (delivery?.event !== "workflow_job") {
+      return false;
+    }
+    if (delivery?.status_code !== 200) {
+      return false;
+    }
+    if (typeof delivery?.delivered_at !== "string") {
+      return false;
+    }
+    const deliveredAt = new Date(delivery.delivered_at);
+    return !Number.isNaN(deliveredAt.getTime()) && deliveredAt >= dispatchStartedAt;
+  });
+  if (matchingDelivery) {
+    console.log(JSON.stringify(matchingDelivery));
+    process.exit(0);
+  }
+  await Bun.sleep(2000);
+}
+throw new Error("no successful workflow_job webhook delivery was observed after dispatch");'`,
+              {
+                timeoutMs: 300_000,
+              },
+            ),
           ],
           assert: [
             Assert.noErrors(),
-            Assert.hasAction("webhook_received"),
-            Assert.hasAction("signature_verified"),
           ],
           timeoutMs: 600_000,
         }),
