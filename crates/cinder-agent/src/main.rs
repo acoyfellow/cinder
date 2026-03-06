@@ -208,19 +208,40 @@ async fn execute_job(
     println!("github runner configured for {}", repo_full_name);
     info!("github runner configured for {}", repo_full_name);
 
-    let status = Command::new("./run.sh")
+    let output = Command::new("./run.sh")
         .current_dir(&job_dir)
         .env("CARGO_HOME", &cargo_home)
         .env("CARGO_TARGET_DIR", &cargo_target)
-        .status()
+        .output()
         .await
         .context("start github runner")?;
-    let exit_code = status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    if !stderr.is_empty() {
+        eprint!("{stderr}");
+    }
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let combined_output = format!("{stdout}\n{stderr}");
+    let workflow_result = if combined_output.contains("completed with result: Succeeded") {
+        Some("Succeeded")
+    } else if combined_output.contains("completed with result: Failed") {
+        Some("Failed")
+    } else if combined_output.contains("completed with result: Cancelled") {
+        Some("Cancelled")
+    } else if combined_output.contains("completed with result: Canceled") {
+        Some("Canceled")
+    } else {
+        None
+    };
 
     println!("job {} completed with exit code {}", job_id, exit_code);
     info!("job {} completed with exit code {}", job_id, exit_code);
 
-    if status.success() {
+    if output.status.success() && workflow_result == Some("Succeeded") {
         if let Some(cache_key) = job.cache_key.as_deref() {
             upload_cache(
                 client,
@@ -245,7 +266,10 @@ async fn execute_job(
         job_id,
         job_dir.display()
     );
-    bail!("github runner exited with {exit_code}");
+    match workflow_result {
+        Some(result) => bail!("github job finished with {result} (runner exit code {exit_code})"),
+        None => bail!("github runner exited with {exit_code} without a terminal job result"),
+    }
 }
 
 async fn ensure_runner_archive(client: &reqwest::Client, toolcache_dir: &PathBuf) -> Result<PathBuf> {

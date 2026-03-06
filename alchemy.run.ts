@@ -26,13 +26,32 @@ function requireEnv(name: string): string {
 const githubPat = requireEnv("GITHUB_PAT");
 const webhookSecret = requireEnv("GITHUB_WEBHOOK_SECRET");
 const internalToken = requireEnv("CINDER_INTERNAL_TOKEN");
-const fixtureRepo = process.env.CINDER_FIXTURE_REPO?.trim() || "acoyfellow/cinder-prd-test";
-const fixtureBranch = process.env.CINDER_FIXTURE_BRANCH?.trim() || "main";
-const fixtureWorkflow =
-  process.env.CINDER_FIXTURE_WORKFLOW?.trim() || "cinder-proof.yml";
+const legacyFixtureRepo = process.env.CINDER_FIXTURE_REPO?.trim();
+const legacyFixtureBranch = process.env.CINDER_FIXTURE_BRANCH?.trim();
+const legacyFixtureWorkflow = process.env.CINDER_FIXTURE_WORKFLOW?.trim();
+const proofTargetMode =
+  process.env.CINDER_PROOF_TARGET_MODE?.trim() || "existing-repo";
+const proofTargetRepo =
+  process.env.CINDER_PROOF_TARGET_REPO?.trim() ||
+  legacyFixtureRepo ||
+  "acoyfellow/gateproof";
+const proofTargetBranch =
+  process.env.CINDER_PROOF_TARGET_BRANCH?.trim() ||
+  legacyFixtureBranch ||
+  "main";
+const proofTargetWorkflow =
+  process.env.CINDER_PROOF_TARGET_WORKFLOW?.trim() ||
+  legacyFixtureWorkflow ||
+  (proofTargetMode === "fixture" ? "cinder-proof.yml" : ".github/workflows/ci.yml");
 const githubApiBase = "https://api.github.com";
 const stateBucketName = process.env.CINDER_STATE_BUCKET?.trim();
 const stateBucketRegion = process.env.CINDER_STATE_REGION?.trim() || "auto";
+
+if (proofTargetMode !== "fixture" && proofTargetMode !== "existing-repo") {
+  throw new Error(
+    `CINDER_PROOF_TARGET_MODE must be "fixture" or "existing-repo" but received "${proofTargetMode}"`,
+  );
+}
 
 const fixtureCargoToml = `[package]
 name = "cinder-proof"
@@ -186,12 +205,12 @@ jobs:
         run: cargo run --locked
 `;
 
-function parseFixtureRepository(repoRef: string) {
+function parseTargetRepository(repoRef: string) {
   const [owner, name, ...extra] = repoRef.split("/");
 
   if (!owner || !name || extra.length > 0) {
     throw new Error(
-      `CINDER_FIXTURE_REPO must be "owner/name" but received "${repoRef}"`,
+      `CINDER_PROOF_TARGET_REPO must be "owner/name" but received "${repoRef}"`,
     );
   }
 
@@ -225,7 +244,7 @@ async function githubRequest(
 }
 
 async function ensureFixtureRepository() {
-  const { owner, name } = parseFixtureRepository(fixtureRepo);
+  const { owner, name } = parseTargetRepository(proofTargetRepo);
   const existing = await githubRequest(`/repos/${owner}/${name}`, {}, [200, 404]);
 
   if (existing.status === 200) {
@@ -238,7 +257,7 @@ async function ensureFixtureRepository() {
 
   if (viewer.login !== owner) {
     throw new Error(
-      `Fixture repo ${fixtureRepo} is missing and cannot be auto-created because PAT owner "${viewer.login}" does not match "${owner}"`,
+      `Fixture repo ${proofTargetRepo} is missing and cannot be auto-created because PAT owner "${viewer.login}" does not match "${owner}"`,
     );
   }
 
@@ -260,13 +279,13 @@ async function ensureFixtureRepository() {
 }
 
 async function ensureFixtureBranch(repo: { default_branch: string }) {
-  if (fixtureBranch === repo.default_branch) {
+  if (proofTargetBranch === repo.default_branch) {
     return;
   }
 
-  const { owner, name } = parseFixtureRepository(fixtureRepo);
+  const { owner, name } = parseTargetRepository(proofTargetRepo);
   const branchResponse = await githubRequest(
-    `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(fixtureBranch)}`,
+    `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(proofTargetBranch)}`,
     {},
     [200, 404],
   );
@@ -286,7 +305,7 @@ async function ensureFixtureBranch(repo: { default_branch: string }) {
     {
       method: "POST",
       body: JSON.stringify({
-        ref: `refs/heads/${fixtureBranch}`,
+        ref: `refs/heads/${proofTargetBranch}`,
         sha: defaultBranchRef.object.sha,
       }),
     },
@@ -295,13 +314,13 @@ async function ensureFixtureBranch(repo: { default_branch: string }) {
 }
 
 async function upsertFixtureFile(path: string, content: string, message: string) {
-  const { owner, name } = parseFixtureRepository(fixtureRepo);
+  const { owner, name } = parseTargetRepository(proofTargetRepo);
   const encodedPath = path
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
   const existing = await githubRequest(
-    `/repos/${owner}/${name}/contents/${encodedPath}?ref=${encodeURIComponent(fixtureBranch)}`,
+    `/repos/${owner}/${name}/contents/${encodedPath}?ref=${encodeURIComponent(proofTargetBranch)}`,
     {},
     [200, 404],
   );
@@ -316,7 +335,7 @@ async function upsertFixtureFile(path: string, content: string, message: string)
       method: "PUT",
       body: JSON.stringify({
         message,
-        branch: fixtureBranch,
+        branch: proofTargetBranch,
         content: Buffer.from(content, "utf8").toString("base64"),
         sha,
       }),
@@ -326,7 +345,7 @@ async function upsertFixtureFile(path: string, content: string, message: string)
 }
 
 async function upsertFixtureWebhook(webhookUrl: string) {
-  const { owner, name } = parseFixtureRepository(fixtureRepo);
+  const { owner, name } = parseTargetRepository(proofTargetRepo);
   const hooks = (await (
     await githubRequest(`/repos/${owner}/${name}/hooks`)
   ).json()) as Array<{ id: number; name: string; config?: { url?: string } }>;
@@ -366,7 +385,47 @@ async function upsertFixtureWebhook(webhookUrl: string) {
   );
 }
 
-async function syncFixtureRepository(webhookUrl: string) {
+async function ensureExistingProofTarget() {
+  const { owner, name } = parseTargetRepository(proofTargetRepo);
+  const repoResponse = await githubRequest(`/repos/${owner}/${name}`, {}, [200, 404]);
+  if (repoResponse.status === 404) {
+    throw new Error(`Proof target repo ${proofTargetRepo} does not exist or is not accessible`);
+  }
+
+  const branchResponse = await githubRequest(
+    `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(proofTargetBranch)}`,
+    {},
+    [200, 404],
+  );
+  if (branchResponse.status === 404) {
+    throw new Error(
+      `Proof target branch ${proofTargetBranch} does not exist in ${proofTargetRepo}`,
+    );
+  }
+
+  const encodedWorkflowPath = proofTargetWorkflow
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const workflowResponse = await githubRequest(
+    `/repos/${owner}/${name}/contents/${encodedWorkflowPath}?ref=${encodeURIComponent(proofTargetBranch)}`,
+    {},
+    [200, 404],
+  );
+  if (workflowResponse.status === 404) {
+    throw new Error(
+      `Proof target workflow ${proofTargetWorkflow} does not exist in ${proofTargetRepo}@${proofTargetBranch}`,
+    );
+  }
+}
+
+async function prepareProofTarget(webhookUrl: string) {
+  if (proofTargetMode === "existing-repo") {
+    await ensureExistingProofTarget();
+    await upsertFixtureWebhook(webhookUrl);
+    return;
+  }
+
   const repo = await ensureFixtureRepository();
   await ensureFixtureBranch(repo);
 
@@ -374,7 +433,7 @@ async function syncFixtureRepository(webhookUrl: string) {
   await upsertFixtureFile("Cargo.lock", fixtureCargoLock, "chore: sync cinder fixture Cargo.lock");
   await upsertFixtureFile("src/main.rs", fixtureMainRs, "chore: sync cinder fixture main.rs");
   await upsertFixtureFile(
-    `.github/workflows/${fixtureWorkflow}`,
+    `.github/workflows/${proofTargetWorkflow}`,
     fixtureWorkflowContents,
     "chore: sync cinder fixture workflow",
   );
@@ -452,14 +511,14 @@ export const orchestrator = await Worker("cinder-orchestrator", {
     CINDER_INTERNAL_TOKEN: alchemy.secret(internalToken),
     GITHUB_PAT: alchemy.secret(githubPat),
     CINDER_CACHE_WORKER_URL: cacheWorker.url!,
-    CINDER_FIXTURE_REPO: fixtureRepo,
-    CINDER_FIXTURE_BRANCH: fixtureBranch,
-    CINDER_FIXTURE_WORKFLOW: fixtureWorkflow,
+    CINDER_FIXTURE_REPO: proofTargetRepo,
+    CINDER_FIXTURE_BRANCH: proofTargetBranch,
+    CINDER_FIXTURE_WORKFLOW: proofTargetWorkflow,
   },
 });
 
 await app.finalize();
-await syncFixtureRepository(`${orchestrator.url}/webhook/github`);
+await prepareProofTarget(`${orchestrator.url}/webhook/github`);
 
 const runtimeDirectory = new URL("./.gateproof/", import.meta.url);
 const runtimeFile = new URL("./.gateproof/runtime.json", import.meta.url);
@@ -476,9 +535,13 @@ await Bun.write(
       orchestratorUrl: orchestrator.url,
       cacheWorkerName: cacheWorker.name,
       cacheWorkerUrl: cacheWorker.url,
-      fixtureRepo,
-      fixtureBranch,
-      fixtureWorkflow,
+      proofTargetMode,
+      proofTargetRepo,
+      proofTargetBranch,
+      proofTargetWorkflow,
+      fixtureRepo: proofTargetMode === "fixture" ? proofTargetRepo : undefined,
+      fixtureBranch: proofTargetMode === "fixture" ? proofTargetBranch : undefined,
+      fixtureWorkflow: proofTargetMode === "fixture" ? proofTargetWorkflow : undefined,
     },
     null,
     2,

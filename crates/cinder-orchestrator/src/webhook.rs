@@ -42,6 +42,15 @@ pub async fn handle(mut req: Request, ctx: RouteContext<AppState>) -> Result<Res
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+
+        let is_cinder_job =
+            labels.iter().any(|label| label == "self-hosted")
+                && labels.iter().any(|label| label == "cinder");
+        if !is_cinder_job {
+            console_log!("action=job_skipped job_id={}", job_id);
+            return Response::ok("ignored");
+        }
+
         let queue = ctx.env.durable_object("JOB_QUEUE")?;
         let queue_id = queue.id_from_name("default")?;
         let stub = queue_id.get_stub()?;
