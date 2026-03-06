@@ -11,13 +11,20 @@ cinder makes your github actions builds faster by caching deps at the cloudflare
 
 ---
 
-## how fast
+## current proof status
 
-the gateproof case study proves a real cold run and a real warm run on the canonical Cargo fixture repo. `speed-claim` only passes when the warm run is measurably faster than the cold run (`SPEED_THRESHOLD_MS`, default `60000`).
+there are two truths in this repository now:
 
-cache lives in R2 and is served through a dedicated cache worker. runners restore before execution and upload after execution.
+- **historical chapter:** the original gateproof case study preserved a Cargo fixture proof that exercised cache restore/upload and a real warm-vs-cold speed claim.
+- **current live chapter:** the current `main` branch proves a real existing-repo dogfood path where cinder runs Gateproof's docs deploy workflow on a self-hosted Cinder runner.
 
-**Demo:** Run the full proof locally (webhook, queue, runner, cache, speed claim). See [examples/](examples/).
+the current live hardening proof now also proves:
+
+- stale queued Gateproof deploy runs are skipped automatically by the orchestrator
+- the queue and runner proofs bind to the exact intended `run_id` / `job_id`
+- deploy smoke covers `/`, `/case-studies`, and `/case-studies/cinder`
+
+the historical Cargo cache/speed story is still preserved in the case-study history, but it is **not** the current live acceptance contract on `main`.
 
 ---
 
@@ -28,13 +35,15 @@ github webhook
   → cinder orchestrator   (cloudflare worker)
     → job queued           (durable object)
       → your agent picks it up
-        → cache pulled from R2
-          → CARGO_HOME + CARGO_TARGET_DIR staged for the run
-            → cargo build runs
-              → cache archive pushed back to R2
+        → exact run/job selected
+          → ephemeral github runner registered for that repo
+            → workflow job runs on your machine
+              → deploy smoke proves the public result
 ```
 
-current proven cache key: `sha256(Cargo.lock)` from the fixture repo.
+current live witness repo on `main`: `acoyfellow/gateproof`
+
+historical fixture cache key: `sha256(Cargo.lock)` from the preserved Cargo witness repo.
 
 ---
 
@@ -74,15 +83,14 @@ that's it. no other changes.
 
 ---
 
-## supported ecosystems
+## current proven modes
 
-currently proven in this repository:
-
-| lockfile | cache dirs staged by agent |
+| mode | what is currently proven |
 |---|---|
-| `Cargo.lock` | `CARGO_HOME`, `CARGO_TARGET_DIR` |
+| existing repo | Gateproof docs deploy workflow runs through Cinder on a self-hosted runner |
+| historical fixture | preserved Cargo fixture proof with cache restore/upload and warm-speed claim |
 
-other ecosystems are roadmap work, not part of the current proven implementation.
+other ecosystems and generalized cache claims are still future work, not current live proof on `main`.
 
 ---
 
@@ -90,7 +98,10 @@ other ecosystems are roadmap work, not part of the current proven implementation
 
 - cloudflare account (free tier is fine)
 - `bun` for deployment
-- one machine to run the agent (any linux box)
+- one machine to run the agent
+- `GITHUB_PAT`
+- `GITHUB_WEBHOOK_SECRET`
+- `CINDER_INTERNAL_TOKEN`
 
 ---
 
@@ -119,6 +130,19 @@ cinder deploy --state-bucket my-existing-bucket
 ```
 
 if you are switching an already-running stage to a new state bucket, use a clean stage for that migration path.
+
+**target an existing repo for the live proof**
+
+the current live proof defaults to existing-repo mode against Gateproof. to point Cinder at another repo:
+
+```bash
+export CINDER_PROOF_TARGET_MODE=existing-repo
+export CINDER_PROOF_TARGET_REPO=owner/repo
+export CINDER_PROOF_TARGET_BRANCH=main
+export CINDER_PROOF_TARGET_WORKFLOW=.github/workflows/ci.yml
+```
+
+`bun run provision` will validate repo access and sync only the webhook/runtime target metadata. it will not write fixture files into an existing repo.
 
 ---
 
@@ -184,6 +208,15 @@ for the gateproof proof loop, provisioning and proving are separate on purpose:
 3. run `bun run prove`
 
 `alchemy.run.ts` writes `.gateproof/runtime.json` after provisioning. `plan.ts` reads that file so the proof loop can rerun without reprovisioning.
+
+on current `main`, the live proof contract is:
+
+- `webhook` — a real Gateproof `workflow_job` webhook reaches Cinder
+- `queue` — the queued Gateproof deploy job is execution-ready and matches the expected fresh run
+- `runner` — the local `cinder-agent` runs the exact intended Gateproof deploy job
+- `deploy-smoke` — the deployed Gateproof site is healthy on `/`, `/case-studies`, and `/case-studies/cinder`
+
+the hardening chapter also seeds one stale Gateproof run before dispatching the target run, so manual GitHub queue cleanup is not required for the proof to pass.
 
 This case study starts from the smallest honest state:
 
