@@ -106,6 +106,21 @@ async fn main() -> Result<()> {
         let run_id = job.run_id;
         let repo_full_name = job.repo_full_name.clone();
 
+        let run_id_label = run_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let repo_label = repo_full_name
+            .as_deref()
+            .unwrap_or("unknown");
+
+        println!(
+            "accepted job {} for run {} repo {}",
+            job_id, run_id_label, repo_label
+        );
+        info!(
+            "accepted job {} for run {} repo {}",
+            job_id, run_id_label, repo_label
+        );
         info!("got job {} for repo {:?}", job_id, repo_full_name);
 
         if let Err(error) = execute_job(&client, &args, &runner_id, &job).await {

@@ -563,16 +563,26 @@ while (Date.now() < deadline) {
 if (!run || run.status !== "completed") {
   throw new Error("GitHub workflow run did not complete");
 }
-const logNeedles = ["starting github runner for job", "completed with exit code 0"];
+const logNeedles = [
+  "accepted job " + payload.job_id + " for run " + payload.run_id + " repo " + payload.repo_full_name,
+  "starting github runner for job " + payload.job_id,
+  "github runner configured for " + payload.repo_full_name,
+  "job " + payload.job_id + " completed with exit code 0",
+];
 const logDeadline = Date.now() + 30000;
+let exactLogsObserved = false;
 while (Date.now() < logDeadline) {
   if (existsSync(${JSON.stringify(agentLogPath)})) {
     const logContents = readFileSync(${JSON.stringify(agentLogPath)}, "utf8");
     if (logNeedles.every((needle) => logContents.includes(needle))) {
+      exactLogsObserved = true;
       break;
     }
   }
   await Bun.sleep(500);
+}
+if (!exactLogsObserved) {
+  throw new Error("agent log did not include the exact accepted-job identity lines");
 }
 console.log(JSON.stringify(run));
 if (existsSync(${JSON.stringify(agentLogPath)})) {
@@ -592,6 +602,7 @@ if (run.conclusion !== "success") {
             Assert.hasAction("runner_pool_updated"),
             Assert.hasAction("job_dequeued"),
             Assert.responseBodyIncludes(`"conclusion":"success"`),
+            Assert.responseBodyIncludes("accepted job "),
             Assert.responseBodyIncludes("starting github runner for job"),
             Assert.responseBodyIncludes("completed with exit code 0"),
           ],
