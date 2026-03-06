@@ -546,12 +546,50 @@ if (run.conclusion !== "success") {
         gate: Gate.define({
           act: [
             Act.exec(
-              `sh -c 'status="$(curl -s -o /tmp/cinder-proof-gateproof-smoke.html -w "%{http_code}" -L ${demoUrl})"; test "$status" = "200" && echo "smoke ok $status" && head -n 5 /tmp/cinder-proof-gateproof-smoke.html'`,
+              `bun -e 'const baseUrl = ${JSON.stringify(demoUrl)};
+const checks = [
+  {
+    path: "/",
+    needle: "Build software in reverse.",
+  },
+  {
+    path: "/case-studies",
+    needle: "Historical validation records.",
+  },
+  {
+    path: "/case-studies/cinder",
+    needle: "Chapter 2: Gateproof docs dogfood proof",
+  },
+];
+
+for (const check of checks) {
+  const response = await fetch(baseUrl + check.path, { redirect: "follow" });
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      "smoke failed for " + check.path + ": expected 200 but observed " + response.status,
+    );
+  }
+
+  if (!body.includes(check.needle)) {
+    throw new Error(
+      "smoke failed for " +
+        check.path +
+        ": response missing marker " +
+        JSON.stringify(check.needle),
+    );
+  }
+
+  console.log("smoke ok " + check.path + " " + response.status);
+}'`,
             ),
           ],
           assert: [
             Assert.noErrors(),
-            Assert.responseBodyIncludes("smoke ok 200"),
+            Assert.responseBodyIncludes("smoke ok / 200"),
+            Assert.responseBodyIncludes("smoke ok /case-studies 200"),
+            Assert.responseBodyIncludes("smoke ok /case-studies/cinder 200"),
           ],
           timeoutMs: 30_000,
         }),
