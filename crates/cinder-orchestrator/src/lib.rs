@@ -4,6 +4,7 @@ mod build;
 mod cache;
 mod job_queue_do;
 mod jobs;
+mod repos;
 mod runner_pool_do;
 mod runners;
 mod webhook;
@@ -37,6 +38,8 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // public — github calls this
         .post_async("/webhook/github", webhook::handle)
         // internal — agents call these
+        .post_async("/repos/connect", repos::connect)
+        .get_async("/repos/:owner/:repo/state", repos::state)
         .get_async("/jobs/peek", jobs::peek)
         .get_async("/jobs/next", jobs::next)
         .post_async("/runners/register", runners::register)

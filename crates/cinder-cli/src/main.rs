@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -39,6 +39,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: TokenCommands,
     },
+    /// manage connected repos
+    Repo {
+        #[command(subcommand)]
+        cmd: RepoCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +73,20 @@ enum TokenCommands {
     Rotate,
 }
 
+#[derive(Subcommand)]
+enum RepoCommands {
+    /// connect a GitHub repo to this cinder deployment
+    Connect {
+        repo: String,
+
+        #[arg(long, default_value = "main")]
+        branch: String,
+
+        #[arg(long, default_value = ".github/workflows/ci.yml")]
+        workflow: String,
+    },
+}
+
 #[derive(Clone, Debug, ValueEnum)]
 enum StateRegion {
     Auto,
@@ -95,6 +114,13 @@ impl StateRegion {
 struct RuntimeManifest {
     #[serde(rename = "orchestratorUrl")]
     orchestrator_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConnectRepoRequest {
+    repo: String,
+    branch: String,
+    workflow: String,
 }
 
 #[tokio::main]
@@ -200,6 +226,44 @@ async fn main() -> Result<()> {
                 None,
             )?;
             println!("{token}");
+        }
+        Commands::Repo {
+            cmd:
+                RepoCommands::Connect {
+                    repo,
+                    branch,
+                    workflow,
+                },
+        } => {
+            let base_url = resolve_base_url(&repo_root)?;
+            let token = resolve_agent_token()?;
+            let client = reqwest::Client::new();
+            let response = client
+                .post(format!("{}/repos/connect", base_url.trim_end_matches('/')))
+                .bearer_auth(token)
+                .json(&ConnectRepoRequest {
+                    repo: repo.clone(),
+                    branch,
+                    workflow,
+                })
+                .send()
+                .await
+                .context("failed to connect repo")?;
+
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("failed to read response body"));
+            if !status.is_success() {
+                return Err(anyhow::anyhow!(
+                    "repo connect failed with {}: {}",
+                    status,
+                    body
+                ));
+            }
+
+            println!("connected {repo}");
         }
     }
 

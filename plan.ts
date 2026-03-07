@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { ScopeFile } from "gateproof";
-import { Act, Assert, Gate, Plan, Require } from "gateproof";
+import { Act, Assert, Gate, Plan, Require, createHttpObserveResource } from "gateproof";
 import { Cloudflare } from "gateproof/cloudflare";
 
 type RuntimeState = {
@@ -147,45 +147,78 @@ if (!process.env.CINDER_WORKER_NAME && workerName) {
   process.env.CINDER_WORKER_NAME = workerName;
 }
 
-if (!process.env.CINDER_PROOF_TARGET_MODE && proofTargetMode) {
-  process.env.CINDER_PROOF_TARGET_MODE = proofTargetMode;
-}
-
-if (!process.env.CINDER_PROOF_TARGET_REPO && targetRepo) {
-  process.env.CINDER_PROOF_TARGET_REPO = targetRepo;
-}
-
-if (!process.env.CINDER_PROOF_TARGET_BRANCH && targetBranch) {
-  process.env.CINDER_PROOF_TARGET_BRANCH = targetBranch;
-}
-
-if (!process.env.CINDER_PROOF_TARGET_WORKFLOW && targetWorkflow) {
-  process.env.CINDER_PROOF_TARGET_WORKFLOW = targetWorkflow;
-}
-
 const scope = {
   spec: {
     title: "Cinder",
     tutorial: {
-      goal: "Prove cinder on a live deployment, not just on a fixture repo.",
+      goal: "Prove that cinder can onboard a real repo through its own product path.",
       outcome:
-        "Cinder only exits green when it can run Gateproof's real docs deploy workflow on a self-hosted Cinder runner.",
+        "Cinder only exits green when a user can deploy it, connect Gateproof, start an agent, and watch Gateproof run through Cinder.",
     },
     howTo: {
-      task: "Provision Cinder against an existing proof target, then run the live proof loop.",
+      task: "Deploy Cinder, connect Gateproof through the CLI, then run the live proof loop.",
       done:
-        "Webhook intake, queueing, runner execution, and the deployed docs smoke check all pass against the real Gateproof repo.",
+        "Repo connect, webhook intake, queueing, runner execution, and deployed docs smoke all pass against the real Gateproof repo.",
     },
     explanation: {
       summary:
-        "alchemy.run.ts provisions Cinder and wires a proof target repo. plan.ts reruns the live dogfood proof against that target.",
+        "The runtime is already repo-aware. This chapter opens the loop by making repo onboarding part of the proof contract.",
     },
   },
   plan: Plan.define({
     goals: [
       {
+        id: "repo-connect",
+        title: "Cinder exposes a real product path for connecting Gateproof",
+        gate: Gate.define({
+          observe: createHttpObserveResource({
+            url: `${baseUrl}/repos/${targetRepo}/state`,
+            headers: {
+              Authorization: `Bearer ${internalToken}`,
+            },
+          }),
+          prerequisites: [
+            Require.env(
+              "GITHUB_PAT",
+              "GITHUB_PAT is required to connect a GitHub repo through Cinder.",
+            ),
+            Require.env(
+              "CINDER_BASE_URL",
+              "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
+            ),
+            Require.env(
+              "CINDER_INTERNAL_TOKEN",
+              "CINDER_INTERNAL_TOKEN is required to inspect connected repo state.",
+            ),
+          ],
+          act: [
+            Act.exec(
+              `cargo run --quiet -p cinder-cli -- repo connect ${JSON.stringify(targetRepo)} --branch ${JSON.stringify(targetBranch)} --workflow ${JSON.stringify(targetWorkflow)}`,
+              {
+                timeoutMs: 120_000,
+              },
+            ),
+            Act.exec(
+              `curl -sf ${baseUrl}/repos/${targetRepo}/state -H "Authorization: Bearer ${internalToken}"`,
+              {
+                timeoutMs: 30_000,
+              },
+            ),
+          ],
+          assert: [
+            Assert.httpResponse({ status: 200 }),
+            Assert.responseBodyIncludes(targetRepo),
+            Assert.responseBodyIncludes(targetWorkflow),
+            Assert.responseBodyIncludes("self-hosted"),
+            Assert.responseBodyIncludes("cinder"),
+            Assert.noErrors(),
+          ],
+          timeoutMs: 180_000,
+        }),
+      },
+      {
         id: "webhook",
-        title: "A real Gateproof workflow_job webhook reaches Cinder",
+        title: "A connected Gateproof workflow_job webhook reaches Cinder",
         gate: Gate.define({
           prerequisites: [
             Require.env(
@@ -403,7 +436,7 @@ throw new Error("no successful workflow_job webhook delivery was observed after 
       },
       {
         id: "queue",
-        title: "The queued Gateproof deploy job is execution-ready",
+        title: "The connected Gateproof deploy job is execution-ready",
         gate: Gate.define({
           prerequisites: [
             Require.env(
@@ -489,7 +522,7 @@ throw new Error("no queued Gateproof deploy job became available");'`,
       },
       {
         id: "runner",
-        title: "The local cinder-agent runs Gateproof's real deploy job",
+        title: "The local cinder-agent runs the connected Gateproof deploy job",
         gate: Gate.define({
           observe: workerLogs,
           prerequisites: [
