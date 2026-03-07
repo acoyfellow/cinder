@@ -85,6 +85,8 @@ enum RepoCommands {
         #[arg(long, default_value = ".github/workflows/ci.yml")]
         workflow: String,
     },
+    /// list connected repos
+    Ls,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -264,6 +266,28 @@ async fn main() -> Result<()> {
             }
 
             println!("connected {repo}");
+        }
+        Commands::Repo { cmd: RepoCommands::Ls } => {
+            let base_url = resolve_base_url(&repo_root)?;
+            let token = resolve_agent_token()?;
+            let client = reqwest::Client::new();
+            let response = client
+                .get(format!("{}/repos", base_url.trim_end_matches('/')))
+                .bearer_auth(token)
+                .send()
+                .await
+                .context("failed to list repos")?;
+
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("failed to read response body"));
+            if !status.is_success() {
+                return Err(anyhow::anyhow!("repo list failed with {}: {}", status, body));
+            }
+
+            println!("{body}");
         }
     }
 

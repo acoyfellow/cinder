@@ -39,6 +39,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/webhook/github", webhook::handle)
         // internal — agents call these
         .post_async("/repos/connect", repos::connect)
+        .get_async("/repos", repos::list)
         .get_async("/repos/:owner/:repo/state", repos::state)
         .get_async("/jobs/peek", jobs::peek)
         .get_async("/jobs/next", jobs::next)

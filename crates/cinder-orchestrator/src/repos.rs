@@ -233,6 +233,31 @@ pub async fn connect(mut req: Request, ctx: RouteContext<AppState>) -> Result<Re
     Response::from_json(&state)
 }
 
+pub async fn list(req: Request, ctx: RouteContext<AppState>) -> Result<Response> {
+    if let Err(worker::Error::RustError(message)) = require_internal_token(&req, &ctx) {
+        return Response::error(&message, 401);
+    }
+
+    let kv = ctx.kv("RUNNER_STATE")?;
+    let listed = kv
+        .list()
+        .prefix(REPO_KEY_PREFIX.to_string())
+        .execute()
+        .await
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+
+    let mut repos = Vec::new();
+    for key in listed.keys {
+        if let Some(state) = kv.get(&key.name).json::<ConnectedRepoState>().await? {
+            repos.push(state);
+        }
+    }
+
+    repos.sort_by(|left, right| left.repo.cmp(&right.repo));
+
+    Response::from_json(&repos)
+}
+
 pub async fn state(req: Request, ctx: RouteContext<AppState>) -> Result<Response> {
     if let Err(worker::Error::RustError(message)) = require_internal_token(&req, &ctx) {
         return Response::error(&message, 401);
