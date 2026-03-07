@@ -19,6 +19,8 @@ there are two truths in this repository now:
 - **current live chapter:** the current `main` branch proves a real existing-repo dogfood path where cinder runs Gateproof's docs deploy workflow on a self-hosted Cinder runner.
 
 the current live proof now also proves:
+- Gateproof can be connected through Cinder's own product path
+- connected repos can be listed, inspected, and dispatched through Cinder
 - the queue and runner proofs bind to the intended Gateproof deploy run
 - deploy smoke covers `/`, `/case-studies`, and `/case-studies/cinder`
 
@@ -68,7 +70,18 @@ cinder agent start \
 
 runs on hetzner, fly.io, your laptop, anywhere. the agent polls for jobs and manages the local cache staging dir.
 
-**3. update your workflow**
+**3. connect your repo**
+
+```bash
+cinder repo connect acoyfellow/gateproof
+cinder repo ls
+cinder repo status acoyfellow/gateproof
+cinder repo dispatch acoyfellow/gateproof
+```
+
+cinder validates the repo, branch, workflow, and webhook, then stores the connected repo in Cinder-owned state.
+
+**4. update your workflow**
 
 ```yaml
 jobs:
@@ -79,7 +92,7 @@ jobs:
       - run: cargo build --release
 ```
 
-that's it. no other changes.
+that's it. for the current live witness repo, Cinder can now connect, list, inspect, and dispatch the repo through its own product path before the agent picks up the deploy job.
 
 ---
 
@@ -131,9 +144,9 @@ cinder deploy --state-bucket my-existing-bucket
 
 if you are switching an already-running stage to a new state bucket, use a clean stage for that migration path.
 
-**target an existing repo for the live proof**
+**target an existing repo for provisioning/proof setup**
 
-the current live proof defaults to existing-repo mode against Gateproof. to point Cinder at another repo:
+the current live proof still defaults to existing-repo mode against Gateproof for chapter wiring. to point the live proof at another repo:
 
 ```bash
 export CINDER_PROOF_TARGET_MODE=existing-repo
@@ -142,7 +155,7 @@ export CINDER_PROOF_TARGET_BRANCH=main
 export CINDER_PROOF_TARGET_WORKFLOW=.github/workflows/ci.yml
 ```
 
-`bun run provision` will validate repo access and sync only the webhook/runtime target metadata. it will not write fixture files into an existing repo.
+`bun run provision` will validate repo access and sync only the webhook/runtime target metadata. it will not write fixture files into an existing repo. the normal product story on current `main` is still `cinder repo connect`, not manual env swapping.
 
 ---
 
@@ -211,6 +224,10 @@ for the gateproof proof loop, provisioning and proving are separate on purpose:
 
 on current `main`, the live proof contract is:
 
+- `repo-connect` — Gateproof can be connected through Cinder's own CLI
+- `repo-list` — connected repos can be listed through Cinder
+- `repo-status` — connected repo state is visible through Cinder
+- `repo-dispatch` — Gateproof's workflow can be dispatched through Cinder
 - `webhook` — a real Gateproof `workflow_job` webhook reaches Cinder
 - `queue` — the queued Gateproof deploy job is execution-ready and matches the expected fresh run
 - `runner` — the local `cinder-agent` runs the exact intended Gateproof deploy job
