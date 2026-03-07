@@ -18,13 +18,13 @@ there are two truths in this repository now:
 - **historical chapter:** the original gateproof case study preserved a Cargo fixture proof that exercised cache restore/upload and a real warm-vs-cold speed claim.
 - **current live chapter:** the current `main` branch proves a real existing-repo dogfood path where cinder runs Gateproof's docs deploy workflow on a self-hosted Cinder runner.
 
-the current live hardening proof now also proves:
-
-- stale queued Gateproof deploy runs are skipped automatically by the orchestrator
-- the queue and runner proofs bind to the exact intended `run_id` / `job_id`
+the current live proof now also proves:
+- the queue and runner proofs bind to the intended Gateproof deploy run
 - deploy smoke covers `/`, `/case-studies`, and `/case-studies/cinder`
 
 the historical Cargo cache/speed story is still preserved in the case-study history, but it is **not** the current live acceptance contract on `main`.
+
+automatic stale queued-run handling is future hardening work, not part of the current live claim.
 
 ---
 
@@ -216,7 +216,7 @@ on current `main`, the live proof contract is:
 - `runner` — the local `cinder-agent` runs the exact intended Gateproof deploy job
 - `deploy-smoke` — the deployed Gateproof site is healthy on `/`, `/case-studies`, and `/case-studies/cinder`
 
-the hardening chapter also seeds one stale Gateproof run before dispatching the target run, so manual GitHub queue cleanup is not required for the proof to pass.
+the next chapter after this simple dogfood proof is hardening recurring deploys under messy queued-run conditions.
 
 This case study starts from the smallest honest state:
 

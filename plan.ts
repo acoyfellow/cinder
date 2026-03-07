@@ -130,7 +130,6 @@ const agentLogPath = "/tmp/cinder-agent-proof.log";
 const agentPidPath = "/tmp/cinder-agent-proof.pid";
 const queuePayloadPath = "/tmp/cinder-proof-queue-payload.json";
 const expectedRunIdPath = "/tmp/cinder-proof-expected-run-id.txt";
-const primedRunIdPath = "/tmp/cinder-proof-primed-run-id.txt";
 
 const workerLogs = Cloudflare.observe({
   accountId: readOptionalEnv("CLOUDFLARE_ACCOUNT_ID") ?? "",
@@ -194,18 +193,11 @@ const scope = {
               "GITHUB_PAT is required to dispatch the Gateproof workflow.",
             ),
             Require.env(
-              "CINDER_INTERNAL_TOKEN",
-              "CINDER_INTERNAL_TOKEN is required to clear stale queued jobs.",
-            ),
-            Require.env(
               "CINDER_BASE_URL",
               "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
             ),
           ],
           act: [
-            Act.exec(
-              `curl -sf ${baseUrl}/jobs/next -H "Authorization: Bearer ${internalToken}" >/dev/null || true`,
-            ),
             Act.exec(
               `bun -e 'import { rmSync, writeFileSync } from "node:fs";
 const repo = ${JSON.stringify(targetRepo)};
@@ -238,8 +230,8 @@ const runs = Array.isArray(listPayload.workflow_runs) ? listPayload.workflow_run
 const maxId = runs.reduce((highest, run) => {
   return typeof run?.id === "number" && run.id > highest ? run.id : highest;
 }, 0);
-rmSync(${JSON.stringify(primedRunIdPath)}, { force: true });
 rmSync(${JSON.stringify(expectedRunIdPath)}, { force: true });
+writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", new Date().toISOString());
 writeFileSync("/tmp/cinder-proof-gateproof-before.txt", String(maxId));
 '`,
               {
@@ -314,94 +306,13 @@ while (Date.now() < deadline) {
     return typeof run?.id === "number" && run.id > highest ? run.id : highest;
   }, before);
   if (nextRunId > before) {
-    writeFileSync(${JSON.stringify(primedRunIdPath)}, String(nextRunId));
-    console.log(JSON.stringify({ primed_run_id: nextRunId }));
-    process.exit(0);
-  }
-  await Bun.sleep(2000);
-}
-throw new Error("no priming Gateproof workflow run was created after dispatch");'`,
-              {
-                timeoutMs: 300_000,
-              },
-            ),
-            Act.exec(
-              `bun -e 'import { writeFileSync } from "node:fs";
-const repo = ${JSON.stringify(targetRepo)};
-const workflow = ${JSON.stringify(targetWorkflow)};
-const branch = ${JSON.stringify(targetBranch)};
-const token = process.env.GITHUB_PAT;
-if (!token) {
-  throw new Error("GITHUB_PAT is required");
-}
-writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", new Date().toISOString());
-const response = await fetch(
-  "https://api.github.com/repos/" +
-    repo +
-    "/actions/workflows/" +
-    encodeURIComponent(workflow) +
-    "/dispatches",
-  {
-    method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: "Bearer " + token,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ ref: branch }),
-  },
-);
-if (!response.ok) {
-  throw new Error("GitHub workflow dispatch failed: " + response.status);
-}'`,
-            ),
-            Act.exec(
-              `bun -e 'import { readFileSync, writeFileSync } from "node:fs";
-const repo = ${JSON.stringify(targetRepo)};
-const workflow = ${JSON.stringify(targetWorkflow)};
-const branch = ${JSON.stringify(targetBranch)};
-const token = process.env.GITHUB_PAT;
-if (!token) {
-  throw new Error("GITHUB_PAT is required");
-}
-const primedRunId = Number.parseInt(readFileSync(${JSON.stringify(primedRunIdPath)}, "utf8").trim(), 10);
-if (!Number.isFinite(primedRunId)) {
-  throw new Error("missing primed Gateproof workflow run marker");
-}
-const headers = {
-  Accept: "application/vnd.github+json",
-  Authorization: "Bearer " + token,
-  "X-GitHub-Api-Version": "2022-11-28",
-};
-const deadline = Date.now() + 300000;
-while (Date.now() < deadline) {
-  const response = await fetch(
-    "https://api.github.com/repos/" +
-      repo +
-      "/actions/workflows/" +
-      encodeURIComponent(workflow) +
-      "/runs?event=workflow_dispatch&branch=" +
-      encodeURIComponent(branch) +
-      "&per_page=20",
-    { headers },
-  );
-  if (!response.ok) {
-    throw new Error("GitHub workflow run listing failed: " + response.status);
-  }
-  const payload = await response.json();
-  const runs = Array.isArray(payload.workflow_runs) ? payload.workflow_runs : [];
-  const nextRunId = runs.reduce((highest, run) => {
-    return typeof run?.id === "number" && run.id > highest ? run.id : highest;
-  }, primedRunId);
-  if (nextRunId > primedRunId) {
     writeFileSync(${JSON.stringify(expectedRunIdPath)}, String(nextRunId));
-    console.log(JSON.stringify({ primed_run_id: primedRunId, expected_run_id: nextRunId }));
+    console.log(JSON.stringify({ expected_run_id: nextRunId }));
     process.exit(0);
   }
   await Bun.sleep(2000);
 }
-throw new Error("no fresh Gateproof workflow run was created after the primed run");'`,
+throw new Error("no fresh Gateproof workflow run was created after dispatch");'`,
               {
                 timeoutMs: 300_000,
               },
