@@ -364,8 +364,26 @@ pub async fn next(req: Request, ctx: RouteContext<AppState>) -> Result<Response>
         return Response::error(&message, 401);
     }
 
-    let job = resolve_runnable_job(&ctx, true).await?;
-    let prepared = prepare_job(job, &ctx).await?;
+    let job = resolve_runnable_job(&ctx, false).await?;
+    let prepared = match prepare_job(job.clone(), &ctx).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Some(job_id) = job.job_id {
+                let run_id = job.run_id.unwrap_or_default();
+                console_log!(
+                    "action=job_prepare_failed job_id={} run_id={} error={}",
+                    job_id,
+                    run_id,
+                    error
+                );
+            }
+            return Err(error);
+        }
+    };
+
+    if prepared.job_id.is_some() {
+        evict_if_current(&ctx, &job).await?;
+    }
 
     if let Some(job_id) = prepared.job_id {
         let run_id = prepared.run_id.unwrap_or_default();
