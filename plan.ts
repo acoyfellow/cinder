@@ -151,18 +151,18 @@ const scope = {
   spec: {
     title: "Cinder",
     tutorial: {
-      goal: "Prove that cinder can onboard a real repo through its own product path.",
+      goal: "Prove that cinder can connect, list, inspect, and dispatch a real repo through its own product path.",
       outcome:
-        "Cinder only exits green when a user can deploy it, connect Gateproof, start an agent, and watch Gateproof run through Cinder.",
+        "Cinder only exits green when a user can deploy it, connect Gateproof, list and inspect the repo, dispatch it through Cinder, start an agent, and watch Gateproof run through Cinder.",
     },
     howTo: {
-      task: "Deploy Cinder, connect Gateproof through the CLI, then run the live proof loop.",
+      task: "Deploy Cinder, connect Gateproof through the CLI, list and inspect it, dispatch it, then run the live proof loop.",
       done:
-        "Repo connect, webhook intake, queueing, runner execution, and deployed docs smoke all pass against the real Gateproof repo.",
+        "Repo connect, repo list, repo status, repo dispatch, webhook intake, queueing, runner execution, and deployed docs smoke all pass against the real Gateproof repo.",
     },
     explanation: {
       summary:
-        "The runtime is already repo-aware. This chapter opens the loop by making repo onboarding part of the proof contract.",
+        "The runtime is already repo-aware. This chapter opens the loop by making repo onboarding and basic repo operations part of the proof contract.",
     },
   },
   plan: Plan.define({
@@ -217,139 +217,167 @@ const scope = {
         }),
       },
       {
+        id: "repo-list",
+        title: "Cinder can list connected repos through its own product surface",
+        gate: Gate.define({
+          observe: createHttpObserveResource({
+            url: `${baseUrl}/repos`,
+            headers: {
+              Authorization: `Bearer ${internalToken}`,
+            },
+          }),
+          prerequisites: [
+            Require.env(
+              "CINDER_BASE_URL",
+              "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
+            ),
+            Require.env(
+              "CINDER_INTERNAL_TOKEN",
+              "CINDER_INTERNAL_TOKEN is required to inspect connected repos.",
+            ),
+          ],
+          act: [
+            Act.exec("cargo run --quiet -p cinder-cli -- repo ls", {
+              timeoutMs: 60_000,
+            }),
+            Act.exec(
+              `curl -sf ${baseUrl}/repos -H "Authorization: Bearer ${internalToken}"`,
+              {
+                timeoutMs: 30_000,
+              },
+            ),
+          ],
+          assert: [
+            Assert.httpResponse({ status: 200 }),
+            Assert.responseBodyIncludes(targetRepo),
+            Assert.noErrors(),
+          ],
+          timeoutMs: 120_000,
+        }),
+      },
+      {
+        id: "repo-status",
+        title: "Cinder can show the saved state of a connected repo",
+        gate: Gate.define({
+          observe: createHttpObserveResource({
+            url: `${baseUrl}/repos/${targetRepo}/state`,
+            headers: {
+              Authorization: `Bearer ${internalToken}`,
+            },
+          }),
+          prerequisites: [
+            Require.env(
+              "CINDER_BASE_URL",
+              "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
+            ),
+            Require.env(
+              "CINDER_INTERNAL_TOKEN",
+              "CINDER_INTERNAL_TOKEN is required to inspect connected repo state.",
+            ),
+          ],
+          act: [
+            Act.exec(
+              `cargo run --quiet -p cinder-cli -- repo status ${JSON.stringify(targetRepo)}`,
+              {
+                timeoutMs: 60_000,
+              },
+            ),
+            Act.exec(
+              `curl -sf ${baseUrl}/repos/${targetRepo}/state -H "Authorization: Bearer ${internalToken}"`,
+              {
+                timeoutMs: 30_000,
+              },
+            ),
+          ],
+          assert: [
+            Assert.httpResponse({ status: 200 }),
+            Assert.responseBodyIncludes(targetRepo),
+            Assert.responseBodyIncludes(targetWorkflow),
+            Assert.responseBodyIncludes("self-hosted"),
+            Assert.responseBodyIncludes("cinder"),
+            Assert.responseBodyIncludes("connected"),
+            Assert.noErrors(),
+          ],
+          timeoutMs: 120_000,
+        }),
+      },
+      {
+        id: "repo-dispatch",
+        title: "Cinder can trigger a connected repo's workflow through its own product path",
+        gate: Gate.define({
+          observe: createHttpObserveResource({
+            url: `${baseUrl}/repos/${targetRepo}/state`,
+            headers: {
+              Authorization: `Bearer ${internalToken}`,
+            },
+          }),
+          prerequisites: [
+            Require.env(
+              "CINDER_BASE_URL",
+              "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
+            ),
+            Require.env(
+              "CINDER_INTERNAL_TOKEN",
+              "CINDER_INTERNAL_TOKEN is required to inspect connected repo state.",
+            ),
+          ],
+          act: [
+            Act.exec(
+              `cargo run --quiet -p cinder-cli -- repo dispatch ${JSON.stringify(targetRepo)}`,
+              {
+                timeoutMs: 120_000,
+              },
+            ),
+            Act.exec(
+              `bun -e 'import { writeFileSync } from "node:fs";
+const baseUrl = ${JSON.stringify(baseUrl)};
+const token = ${JSON.stringify(internalToken)};
+const repo = ${JSON.stringify(targetRepo)};
+const response = await fetch(baseUrl + "/repos/" + repo + "/state", {
+  headers: {
+    Authorization: "Bearer " + token,
+  },
+});
+if (!response.ok) {
+  throw new Error("repo state fetch failed after dispatch: " + response.status);
+}
+const payload = await response.json();
+if (typeof payload.last_dispatch_requested_at !== "string") {
+  throw new Error("missing last_dispatch_requested_at");
+}
+if (typeof payload.last_dispatch_run_id !== "number") {
+  throw new Error("missing last_dispatch_run_id");
+}
+writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", payload.last_dispatch_requested_at);
+writeFileSync(${JSON.stringify(expectedRunIdPath)}, String(payload.last_dispatch_run_id));
+console.log(JSON.stringify(payload));'`,
+              {
+                timeoutMs: 30_000,
+              },
+            ),
+          ],
+          assert: [
+            Assert.httpResponse({ status: 200 }),
+            Assert.responseBodyIncludes(targetRepo),
+            Assert.responseBodyIncludes(`"last_dispatch_status":"requested"`),
+            Assert.responseBodyIncludes(`"last_dispatch_run_id":`),
+            Assert.noErrors(),
+          ],
+          timeoutMs: 180_000,
+        }),
+      },
+      {
         id: "webhook",
         title: "A connected Gateproof workflow_job webhook reaches Cinder",
         gate: Gate.define({
           prerequisites: [
-            Require.env(
-              "GITHUB_PAT",
-              "GITHUB_PAT is required to dispatch the Gateproof workflow.",
-            ),
+            Require.env("GITHUB_PAT", "GITHUB_PAT is required to inspect GitHub webhook deliveries."),
             Require.env(
               "CINDER_BASE_URL",
               "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
             ),
           ],
           act: [
-            Act.exec(
-              `bun -e 'import { rmSync, writeFileSync } from "node:fs";
-const repo = ${JSON.stringify(targetRepo)};
-const workflow = ${JSON.stringify(targetWorkflow)};
-const branch = ${JSON.stringify(targetBranch)};
-const token = process.env.GITHUB_PAT;
-if (!token) {
-  throw new Error("GITHUB_PAT is required");
-}
-const headers = {
-  Accept: "application/vnd.github+json",
-  Authorization: "Bearer " + token,
-  "X-GitHub-Api-Version": "2022-11-28",
-};
-const encodedWorkflow = encodeURIComponent(workflow);
-const listUrl =
-  "https://api.github.com/repos/" +
-  repo +
-  "/actions/workflows/" +
-  encodedWorkflow +
-  "/runs?event=workflow_dispatch&branch=" +
-  encodeURIComponent(branch) +
-  "&per_page=20";
-const listResponse = await fetch(listUrl, { headers });
-if (!listResponse.ok) {
-  throw new Error("GitHub workflow run listing failed: " + listResponse.status);
-}
-const listPayload = await listResponse.json();
-const runs = Array.isArray(listPayload.workflow_runs) ? listPayload.workflow_runs : [];
-const maxId = runs.reduce((highest, run) => {
-  return typeof run?.id === "number" && run.id > highest ? run.id : highest;
-}, 0);
-rmSync(${JSON.stringify(expectedRunIdPath)}, { force: true });
-writeFileSync("/tmp/cinder-proof-webhook-dispatch-start.txt", new Date().toISOString());
-writeFileSync("/tmp/cinder-proof-gateproof-before.txt", String(maxId));
-'`,
-              {
-                timeoutMs: 60_000,
-              },
-            ),
-            Act.exec(
-              `bun -e 'const repo = ${JSON.stringify(targetRepo)};
-const workflow = ${JSON.stringify(targetWorkflow)};
-const branch = ${JSON.stringify(targetBranch)};
-const token = process.env.GITHUB_PAT;
-if (!token) {
-  throw new Error("GITHUB_PAT is required");
-}
-const response = await fetch(
-  "https://api.github.com/repos/" +
-    repo +
-    "/actions/workflows/" +
-    encodeURIComponent(workflow) +
-    "/dispatches",
-  {
-    method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: "Bearer " + token,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ ref: branch }),
-  },
-);
-if (!response.ok) {
-  throw new Error("GitHub workflow dispatch failed: " + response.status);
-}'`,
-            ),
-            Act.exec(
-              `bun -e 'import { readFileSync, writeFileSync } from "node:fs";
-const repo = ${JSON.stringify(targetRepo)};
-const workflow = ${JSON.stringify(targetWorkflow)};
-const branch = ${JSON.stringify(targetBranch)};
-const token = process.env.GITHUB_PAT;
-if (!token) {
-  throw new Error("GITHUB_PAT is required");
-}
-const before = Number.parseInt(readFileSync("/tmp/cinder-proof-gateproof-before.txt", "utf8").trim(), 10);
-if (!Number.isFinite(before)) {
-  throw new Error("missing prior Gateproof workflow run marker");
-}
-const headers = {
-  Accept: "application/vnd.github+json",
-  Authorization: "Bearer " + token,
-  "X-GitHub-Api-Version": "2022-11-28",
-};
-const deadline = Date.now() + 300000;
-while (Date.now() < deadline) {
-  const response = await fetch(
-    "https://api.github.com/repos/" +
-      repo +
-      "/actions/workflows/" +
-      encodeURIComponent(workflow) +
-      "/runs?event=workflow_dispatch&branch=" +
-      encodeURIComponent(branch) +
-      "&per_page=20",
-    { headers },
-  );
-  if (!response.ok) {
-    throw new Error("GitHub workflow run listing failed: " + response.status);
-  }
-  const payload = await response.json();
-  const runs = Array.isArray(payload.workflow_runs) ? payload.workflow_runs : [];
-  const nextRunId = runs.reduce((highest, run) => {
-    return typeof run?.id === "number" && run.id > highest ? run.id : highest;
-  }, before);
-  if (nextRunId > before) {
-    writeFileSync(${JSON.stringify(expectedRunIdPath)}, String(nextRunId));
-    console.log(JSON.stringify({ expected_run_id: nextRunId }));
-    process.exit(0);
-  }
-  await Bun.sleep(2000);
-}
-throw new Error("no fresh Gateproof workflow run was created after dispatch");'`,
-              {
-                timeoutMs: 300_000,
-              },
-            ),
             Act.exec(
               `bun -e 'const repo = ${JSON.stringify(targetRepo)};
 const token = process.env.GITHUB_PAT;
