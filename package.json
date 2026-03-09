@@ -11,6 +11,8 @@
     "harness": "bun harness.ts",
     "provision": "bun run build:workers && bun alchemy.run.ts",
     "prove": "bun plan.ts",
+    "prove:once": "CINDER_PROVE_ONCE=1 bun plan.ts",
+    "prove:finalize": "bun scripts/finalize-loop.ts",
     "demo": "bun run examples/run-demo.ts"
   },
   "dependencies": {

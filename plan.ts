@@ -1,7 +1,18 @@
 import { Effect } from "effect";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import type { ScopeFile } from "gateproof";
-import { Act, Assert, Gate, Plan, Require, createHttpObserveResource } from "gateproof";
+import { spawnSync } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { ScopeFile, WorkerContext } from "gateproof";
+import {
+  Act,
+  Assert,
+  Gate,
+  Plan,
+  Require,
+  createHttpObserveResource,
+  createOpenCodeWorker,
+} from "gateproof";
 import { Cloudflare } from "gateproof/cloudflare";
 
 type RuntimeState = {
@@ -14,6 +25,13 @@ type RuntimeState = {
   fixtureRepo?: string;
   fixtureBranch?: string;
   fixtureWorkflow?: string;
+};
+
+type LoopBaseState = {
+  branch: string;
+  startHead: string;
+  planPath: string;
+  timestamp: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -76,6 +94,29 @@ function resolveLocalRunnerId(): string {
   }
 }
 
+function parsePositiveInt(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function runGit(args: string[], cwd: string): string {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+  });
+
+  if (result.status !== 0) {
+    const message = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} failed`;
+    throw new Error(message);
+  }
+
+  return result.stdout.trim();
+}
+
 function stopManagedAgent(agentPidPath: string): void {
   if (!existsSync(agentPidPath)) {
     return;
@@ -96,6 +137,10 @@ function stopManagedAgent(agentPidPath: string): void {
     // Ignore pidfile cleanup failures during shutdown.
   }
 }
+
+const planPath = fileURLToPath(import.meta.url);
+const repoRoot = dirname(planPath);
+const loopBasePath = resolve(repoRoot, ".gateproof", "loop-base.json");
 
 const runtimeState = loadRuntimeState();
 const baseUrl = readOptionalEnv("CINDER_BASE_URL") ?? runtimeState?.orchestratorUrl ?? "";
@@ -130,6 +175,13 @@ const agentLogPath = "/tmp/cinder-agent-proof.log";
 const agentPidPath = "/tmp/cinder-agent-proof.pid";
 const queuePayloadPath = "/tmp/cinder-proof-queue-payload.json";
 const expectedRunIdPath = "/tmp/cinder-proof-expected-run-id.txt";
+const proofRunPayloadPath = "/tmp/cinder-proof-run-payload.json";
+const proofOnly = readOptionalEnv("CINDER_PROVE_ONCE") === "1";
+const workerEndpoint = readOptionalEnv("GATEPROOF_WORKER_ENDPOINT");
+const workerApiKey = readOptionalEnv("GATEPROOF_WORKER_API_KEY");
+const workerModel = readOptionalEnv("GATEPROOF_WORKER_MODEL") ?? "gpt-5.3-codex";
+const workerMaxSteps = parsePositiveInt(readOptionalEnv("GATEPROOF_WORKER_MAX_STEPS")) ?? 8;
+const workerTimeoutMs = 10 * 60 * 1000;
 
 const workerLogs = Cloudflare.observe({
   accountId: readOptionalEnv("CLOUDFLARE_ACCOUNT_ID") ?? "",
@@ -147,22 +199,127 @@ if (!process.env.CINDER_WORKER_NAME && workerName) {
   process.env.CINDER_WORKER_NAME = workerName;
 }
 
+function loadLoopBaseState(): LoopBaseState | null {
+  if (!existsSync(loopBasePath)) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(loopBasePath, "utf8"));
+    if (!isRecord(parsed)) {
+      return null;
+    }
+
+    if (
+      typeof parsed.branch !== "string" ||
+      typeof parsed.startHead !== "string" ||
+      typeof parsed.planPath !== "string" ||
+      typeof parsed.timestamp !== "string"
+    ) {
+      return null;
+    }
+
+    return {
+      branch: parsed.branch,
+      startHead: parsed.startHead,
+      planPath: parsed.planPath,
+      timestamp: parsed.timestamp,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeLoopBaseState(state: LoopBaseState): void {
+  mkdirSync(dirname(loopBasePath), { recursive: true });
+  writeFileSync(loopBasePath, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+function ensureLoopBaseState(): LoopBaseState {
+  const branch = runGit(["branch", "--show-current"], repoRoot);
+  if (!branch.startsWith("codex/")) {
+    throw new Error("bun run prove requires a codex/* branch; use bun run prove:once on main");
+  }
+
+  try {
+    runGit(["diff", "--quiet"], repoRoot);
+    runGit(["diff", "--cached", "--quiet"], repoRoot);
+  } catch {
+    throw new Error("bun run prove requires a clean working tree before the loop starts");
+  }
+
+  const existing = loadLoopBaseState();
+  if (existing) {
+    if (existing.branch !== branch) {
+      throw new Error(
+        `existing loop base is for branch ${existing.branch}; switch back or remove ${loopBasePath}`,
+      );
+    }
+
+    if (existing.planPath !== planPath) {
+      throw new Error(
+        `existing loop base points at ${existing.planPath}; remove ${loopBasePath} before continuing`,
+      );
+    }
+
+    return existing;
+  }
+
+  const state: LoopBaseState = {
+    branch,
+    startHead: runGit(["rev-parse", "HEAD"], repoRoot),
+    planPath,
+    timestamp: new Date().toISOString(),
+  };
+  writeLoopBaseState(state);
+  return state;
+}
+
+const defaultWorkerPrompt =
+  "You are Gateproof's built-in worker. Fix only the first failing gate. " +
+  "Keep plan.ts, README.md, and case-study content human-owned unless the active scope explicitly allows them. " +
+  "Return exactly one JSON object with an action: read, write, replace, exec, or done. " +
+  "Do not ask for more context in prose; if you need context, return a read action for one file. " +
+  "Use at most two read actions before making a write, replace, exec, or done decision. " +
+  "Keep changes minimal and stay inside the active scope.";
+
+function createCheckpointWorker() {
+  const baseWorker = createOpenCodeWorker({
+    endpoint: workerEndpoint,
+    apiKey: workerApiKey,
+    model: workerModel,
+    maxSteps: workerMaxSteps,
+    timeoutMs: workerTimeoutMs,
+    prompt: defaultWorkerPrompt,
+  }) as NonNullable<ReturnType<typeof createOpenCodeWorker>>;
+
+  return (context: WorkerContext) =>
+    baseWorker(context).pipe(
+      Effect.map((result) => ({
+        ...result,
+        commitMessage:
+          result.commitMessage ??
+          `wip(loop): ${context.firstFailedGoal?.id ?? "unknown"} iteration ${context.iteration}`,
+      })),
+    );
+}
+
 const scope = {
   spec: {
     title: "Cinder",
     tutorial: {
-      goal: "Prove that cinder can connect, list, inspect, and dispatch a real repo through its own product path.",
+      goal: "Prove that cinder can connect, list, inspect, dispatch, and start a proof run for a real repo through its own product path.",
       outcome:
-        "Cinder only exits green when a user can deploy it, connect Gateproof, list and inspect the repo, dispatch it through Cinder, start an agent, and watch Gateproof run through Cinder.",
+        "Cinder only exits green when a user can deploy it, connect Gateproof, list and inspect the repo, dispatch it through Cinder, start a proof run through Cinder, start an agent, and watch Gateproof run through Cinder.",
     },
     howTo: {
-      task: "Deploy Cinder, connect Gateproof through the CLI, list and inspect it, dispatch it, then run the live proof loop.",
+      task: "Deploy Cinder, connect Gateproof through the CLI, list and inspect it, dispatch it, start a proof run, then run the live proof loop.",
       done:
-        "Repo connect, repo list, repo status, repo dispatch, webhook intake, queueing, runner execution, and deployed docs smoke all pass against the real Gateproof repo.",
+        "Repo connect, repo list, repo status, repo dispatch, repo proof run, webhook intake, queueing, runner execution, and deployed docs smoke all pass against the real Gateproof repo.",
     },
     explanation: {
       summary:
-        "The runtime is already repo-aware. This chapter opens the loop by making repo onboarding and basic repo operations part of the proof contract.",
+        "The runtime is already repo-aware. This chapter opens the loop by making repo onboarding, repo operations, and proof-run control part of the proof contract.",
     },
   },
   plan: Plan.define({
@@ -362,6 +519,79 @@ console.log(JSON.stringify(payload));'`,
             Assert.responseBodyIncludes(`"last_dispatch_status":"requested"`),
             Assert.responseBodyIncludes(`"last_dispatch_run_id":`),
             Assert.noErrors(),
+          ],
+          timeoutMs: 180_000,
+        }),
+      },
+      {
+        id: "repo-proof-run",
+        title: "Cinder can start a proof run for a connected repo through its own product path",
+        scope: {
+          allowedPaths: [
+            "crates/cinder-cli/src/main.rs",
+            "crates/cinder-orchestrator/src/lib.rs",
+            "crates/cinder-orchestrator/src/repos.rs",
+          ],
+          forbiddenPaths: [
+            "README.md",
+            ".gateproof/",
+            "alchemy.run.ts",
+          ],
+          maxChangedFiles: 3,
+          maxChangedLines: 200,
+        },
+        gate: Gate.define({
+          prerequisites: [
+            Require.env(
+              "CINDER_BASE_URL",
+              "Run bun run provision first or set CINDER_BASE_URL to the live orchestrator URL.",
+            ),
+            Require.env(
+              "CINDER_INTERNAL_TOKEN",
+              "CINDER_INTERNAL_TOKEN is required to inspect proof run state.",
+            ),
+          ],
+          act: [
+            Act.exec(
+              `sh -c 'cargo run --quiet -p cinder-cli -- repo prove ${JSON.stringify(targetRepo)} | tee ${JSON.stringify(proofRunPayloadPath)}'`,
+              {
+                timeoutMs: 120_000,
+              },
+            ),
+            Act.exec(
+              `bun -e 'import { writeFileSync } from "node:fs";
+const baseUrl = ${JSON.stringify(baseUrl)};
+const token = ${JSON.stringify(internalToken)};
+const lines = (await Bun.file(${JSON.stringify(proofRunPayloadPath)}).text())
+  .split(/\\r?\\n/)
+  .map((line) => line.trim())
+  .filter(Boolean);
+const payload = JSON.parse(lines.at(-1) ?? "{}");
+const proofRunId = payload.proof_run_id;
+if (typeof proofRunId !== "string" || proofRunId.length === 0) {
+  throw new Error("missing proof_run_id");
+}
+const response = await fetch(baseUrl + "/proof-runs/" + proofRunId, {
+  headers: {
+    Authorization: "Bearer " + token,
+  },
+});
+if (!response.ok) {
+  throw new Error("proof run fetch failed: " + response.status);
+}
+const body = await response.text();
+console.log(body);
+writeFileSync(${JSON.stringify(proofRunPayloadPath)}, body);'`,
+              {
+                timeoutMs: 30_000,
+              },
+            ),
+          ],
+          assert: [
+            Assert.noErrors(),
+            Assert.responseBodyIncludes(targetRepo),
+            Assert.responseBodyIncludes(`"proof_run_id":"`),
+            Assert.responseBodyIncludes(`"status":"`),
           ],
           timeoutMs: 180_000,
         }),
@@ -662,7 +892,8 @@ if (typeof matchedJob.run_id !== "number" || matchedJob.run_id !== payload.run_i
 }
 if (matchedJob.status === "completed" && matchedJob.conclusion !== "success") {
   process.exit(1);
-}'`,
+}
+process.exit(0);'`,
               {
                 timeoutMs: 1_800_000,
               },
@@ -737,13 +968,16 @@ for (const check of checks) {
       },
     ],
     loop: {
-      maxIterations: 1,
+      maxIterations: 8,
       stopOnFailure: true,
     },
     cleanup: {
       actions: [
         Act.exec(
-          `if [ -n "${internalToken}" ] && [ -n "${baseUrl}" ]; then curl -sf -X DELETE ${baseUrl}/runners/${localRunnerId} -H "Authorization: Bearer ${internalToken}" >/dev/null; else exit 0; fi`,
+          `if [ -n "${internalToken}" ] && [ -n "${baseUrl}" ]; then curl -sf --max-time 10 -X DELETE ${baseUrl}/runners/${localRunnerId} -H "Authorization: Bearer ${internalToken}" >/dev/null; else exit 0; fi`,
+          {
+            timeoutMs: 15_000,
+          },
         ),
       ],
     },
@@ -755,12 +989,43 @@ export default scope;
 if (import.meta.main) {
   stopManagedAgent(agentPidPath);
   rmSync(queuePayloadPath, { force: true });
+  rmSync(proofRunPayloadPath, { force: true });
 
   try {
+    if (!proofOnly && !workerEndpoint) {
+      throw new Error(
+        "GATEPROOF_WORKER_ENDPOINT is required for bun run prove; use bun run prove:once for proof-only runs",
+      );
+    }
+
+    if (!proofOnly) {
+      ensureLoopBaseState();
+    }
+
     const result = await Effect.runPromise(
-      Plan.runLoop(scope.plan, {
-        maxIterations: scope.plan.loop?.maxIterations,
-      }),
+      proofOnly
+        ? Plan.run(scope.plan)
+        : Plan.runLoop(scope.plan, {
+            maxIterations: scope.plan.loop?.maxIterations,
+            rerunFailedGoalPrefix: true,
+            worker: createCheckpointWorker(),
+            cwd: repoRoot,
+            planPath,
+            workerTimeoutMs,
+            commit: { enabled: true, allowEmpty: false },
+            onIteration: (status) => {
+              console.log(
+                JSON.stringify({
+                  iteration: status.iteration,
+                  firstFailedGoal: status.firstFailedGoal?.id ?? null,
+                  workerSummary: status.workerSummary,
+                  committed: status.committed,
+                  commitSha: status.commitSha,
+                  reportPath: status.reportPath,
+                }),
+              );
+            },
+          }),
     );
 
     console.log(JSON.stringify(result, null, 2));
@@ -768,6 +1033,9 @@ if (import.meta.main) {
     if (result.status !== "pass") {
       process.exitCode = 1;
     }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
   } finally {
     stopManagedAgent(agentPidPath);
   }

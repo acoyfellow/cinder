@@ -6,6 +6,7 @@ use worker::kv::KvStore;
 use crate::AppState;
 
 const REPO_KEY_PREFIX: &str = "connected_repo:";
+const PROOF_RUN_KEY_PREFIX: &str = "proof_run:";
 
 #[derive(Debug, Deserialize)]
 pub struct ConnectRepoRequest {
@@ -26,6 +27,17 @@ pub struct ConnectedRepoState {
     last_dispatch_status: Option<String>,
     last_dispatch_run_id: Option<u64>,
     last_dispatch_requested_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProofRunState {
+    proof_run_id: String,
+    repo: String,
+    triggered_run_id: u64,
+    status: String,
+    first_failing_gate: Option<String>,
+    started_at: String,
+    finished_at: Option<String>,
 }
 
 fn require_internal_token(req: &Request, ctx: &RouteContext<AppState>) -> Result<()> {
@@ -56,6 +68,10 @@ fn repo_state_key(repo: &str) -> String {
     format!("{REPO_KEY_PREFIX}{repo}")
 }
 
+fn proof_run_key(proof_run_id: &str) -> String {
+    format!("{PROOF_RUN_KEY_PREFIX}{proof_run_id}")
+}
+
 async fn load_connected_repo_state(kv: &KvStore, repo_ref: &str) -> Result<Option<ConnectedRepoState>> {
     kv.get(&repo_state_key(repo_ref))
         .json::<ConnectedRepoState>()
@@ -65,6 +81,20 @@ async fn load_connected_repo_state(kv: &KvStore, repo_ref: &str) -> Result<Optio
 
 async fn save_connected_repo_state(kv: &KvStore, state: &ConnectedRepoState) -> Result<()> {
     kv.put(&repo_state_key(&state.repo), serde_json::to_string(state)?)?
+        .execute()
+        .await
+        .map_err(|error| worker::Error::RustError(error.to_string()))
+}
+
+async fn load_proof_run_state(kv: &KvStore, proof_run_id: &str) -> Result<Option<ProofRunState>> {
+    kv.get(&proof_run_key(proof_run_id))
+        .json::<ProofRunState>()
+        .await
+        .map_err(worker::Error::from)
+}
+
+async fn save_proof_run_state(kv: &KvStore, state: &ProofRunState) -> Result<()> {
+    kv.put(&proof_run_key(&state.proof_run_id), serde_json::to_string(state)?)?
         .execute()
         .await
         .map_err(|error| worker::Error::RustError(error.to_string()))
@@ -385,4 +415,55 @@ pub async fn dispatch(req: Request, ctx: RouteContext<AppState>) -> Result<Respo
     save_connected_repo_state(&kv, &state).await?;
 
     Response::from_json(&state)
+}
+
+pub async fn proof_run_create(req: Request, ctx: RouteContext<AppState>) -> Result<Response> {
+    if let Err(worker::Error::RustError(message)) = require_internal_token(&req, &ctx) {
+        return Response::error(&message, 401);
+    }
+
+    let owner = ctx.param("owner").map_or("", |value| value.as_str());
+    let repo = ctx.param("repo").map_or("", |value| value.as_str());
+    let repo_ref = format!("{owner}/{repo}");
+    let kv = ctx.kv("RUNNER_STATE")?;
+    let state = match load_connected_repo_state(&kv, &repo_ref).await? {
+        Some(state) => state,
+        None => return Response::error("not found", 404),
+    };
+
+    let triggered_run_id = match state.last_dispatch_run_id {
+        Some(run_id) => run_id,
+        None => return Response::error("repo has not been dispatched yet", 409),
+    };
+
+    let proof_run_id = format!(
+        "proof-{}-{}",
+        Date::now().as_millis() as u64,
+        (js_sys::Math::random() * 1_000_000_000.0) as u64
+    );
+    let proof_run = ProofRunState {
+        proof_run_id,
+        repo: state.repo,
+        triggered_run_id,
+        status: "queued".into(),
+        first_failing_gate: None,
+        started_at: js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default(),
+        finished_at: None,
+    };
+    save_proof_run_state(&kv, &proof_run).await?;
+
+    Response::from_json(&proof_run)
+}
+
+pub async fn proof_run_show(req: Request, ctx: RouteContext<AppState>) -> Result<Response> {
+    if let Err(worker::Error::RustError(message)) = require_internal_token(&req, &ctx) {
+        return Response::error(&message, 401);
+    }
+
+    let proof_run_id = ctx.param("id").map_or(String::new(), |v| v.as_str().to_string());
+    let kv = ctx.kv("RUNNER_STATE")?;
+    match load_proof_run_state(&kv, &proof_run_id).await? {
+        Some(state) => Response::from_json(&state),
+        None => Response::error("not found", 404),
+    }
 }

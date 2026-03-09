@@ -95,6 +95,10 @@ enum RepoCommands {
     Dispatch {
         repo: String,
     },
+    /// start a proof run for one connected repo
+    Prove {
+        repo: String,
+    },
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -349,6 +353,34 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| String::from("failed to read response body"));
             if !status.is_success() {
                 return Err(anyhow::anyhow!("repo dispatch failed with {}: {}", status, body));
+            }
+
+            println!("{body}");
+        }
+        Commands::Repo {
+            cmd: RepoCommands::Prove { repo },
+        } => {
+            let base_url = resolve_base_url(&repo_root)?;
+            let token = resolve_agent_token()?;
+            let client = reqwest::Client::new();
+            let response = client
+                .post(format!(
+                    "{}/repos/{}/proof-runs",
+                    base_url.trim_end_matches('/'),
+                    repo
+                ))
+                .bearer_auth(token)
+                .send()
+                .await
+                .context("failed to start repo proof run")?;
+
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("failed to read response body"));
+            if !status.is_success() {
+                return Err(anyhow::anyhow!("repo prove failed with {}: {}", status, body));
             }
 
             println!("{body}");
