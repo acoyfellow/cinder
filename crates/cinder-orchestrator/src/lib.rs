@@ -41,6 +41,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/repos/connect", repos::connect)
         .get_async("/repos", repos::list)
         .post_async("/repos/:owner/:repo/dispatches", repos::dispatch)
+        .post_async("/repos/:owner/:repo/proof-runs", repos::proof_run_create)
         .get_async("/repos/:owner/:repo/state", repos::state)
         .get_async("/jobs/peek", jobs::peek)
         .get_async("/jobs/next", jobs::next)
@@ -50,6 +51,8 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/cache/restore/:key", cache::restore)
         .post_async("/cache/upload", cache::upload)
         .post_async("/test/build", build::run)
+        // proof runs
+        .get_async("/proof-runs/:id", repos::proof_run_show)
         // admin
         .post_async("/internal/token/rotate", |_, _| async {
             Response::error("not implemented", 501)

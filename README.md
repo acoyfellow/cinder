@@ -21,6 +21,7 @@ there are two truths in this repository now:
 the current live proof now also proves:
 - Gateproof can be connected through Cinder's own product path
 - connected repos can be listed, inspected, and dispatched through Cinder
+- connected repos can start and report proof runs through Cinder
 - the queue and runner proofs bind to the intended Gateproof deploy run
 - deploy smoke covers `/`, `/case-studies`, and `/case-studies/cinder`
 
@@ -77,9 +78,10 @@ cinder repo connect acoyfellow/gateproof
 cinder repo ls
 cinder repo status acoyfellow/gateproof
 cinder repo dispatch acoyfellow/gateproof
+cinder repo prove acoyfellow/gateproof
 ```
 
-cinder validates the repo, branch, workflow, and webhook, then stores the connected repo in Cinder-owned state.
+cinder validates the repo, branch, workflow, and webhook, stores the connected repo in Cinder-owned state, and can now create a proof-run record for that connected repo through its own product path.
 
 **4. update your workflow**
 
@@ -228,12 +230,13 @@ on current `main`, the live proof contract is:
 - `repo-list` — connected repos can be listed through Cinder
 - `repo-status` — connected repo state is visible through Cinder
 - `repo-dispatch` — Gateproof's workflow can be dispatched through Cinder
+- `repo-proof-run` — Gateproof proof runs can be started and reported through Cinder
 - `webhook` — a real Gateproof `workflow_job` webhook reaches Cinder
 - `queue` — the queued Gateproof deploy job is execution-ready and matches the expected fresh run
 - `runner` — the local `cinder-agent` runs the exact intended Gateproof deploy job
 - `deploy-smoke` — the deployed Gateproof site is healthy on `/`, `/case-studies`, and `/case-studies/cinder`
 
-the next chapter after this simple dogfood proof is hardening recurring deploys under messy queued-run conditions.
+the next chapter after this proof-run chapter is multi-repo onboarding and isolation.
 
 This case study starts from the smallest honest state:
 
